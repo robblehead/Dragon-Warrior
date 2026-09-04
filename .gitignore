@@ -1,0 +1,11 @@
+# Dependencies
+node_modules/
+
+# Production builds
+dist/
+
+# Logs and caches
+*.log
+.DS_Store
+.chrome-temp/
+scratch/
