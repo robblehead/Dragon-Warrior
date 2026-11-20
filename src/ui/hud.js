@@ -1,755 +1,773 @@
-// Dragon Warrior 3D: Retro-Modern Cel-Shaded HUD, Dialogue System, Modals & Menus
-import * as THREE from 'three';
+// Authentic NES Dragon Warrior Windowed UI Controller
 import { soundEngine } from '../audio/synth.js';
+import { WEAPONS, ARMORS, SHIELDS, SPELL_COSTS } from '../entities/player.js';
+
+export const FIELD_COMMANDS = [
+  { id: 'talk',   label: 'TALK' },
+  { id: 'spell',  label: 'SPELL' },
+  { id: 'status', label: 'STATUS' },
+  { id: 'item',   label: 'ITEM' },
+  { id: 'stairs', label: 'STAIRS' },
+  { id: 'door',   label: 'DOOR' },
+  { id: 'search', label: 'SEARCH' },
+  { id: 'take',   label: 'TAKE' },
+];
+
+export const COMBAT_COMMANDS = [
+  { id: 'fight', label: 'FIGHT' },
+  { id: 'spell', label: 'SPELL' },
+  { id: 'run',   label: 'RUN' },
+  { id: 'item',  label: 'ITEM' },
+];
 
 export class GameUI {
   constructor(game) {
     this.game = game;
+
+    // UI state machine:
+    // 'title' | 'none' | 'command' | 'status' | 'sub_menu' | 'combat_cmd' | 'combat_sub'
+    this.mode = 'title';
+
+    this.titleIndex = 0;
+    this.titleItems = [];
+
+    this.cmdIndex = 0;
+    this.combatCmdIndex = 0;
+
+    this.subIndex = 0;
+    this.subTitle = '';
+    this.subItems = [];
+    this.subReturnMode = 'command';
+
+    // Message queue state
+    this.messageQueue = [];
+    this.currentLine = '';
+    this.charIdx = 0;
     this.typewriterTimer = null;
-    this.currentDialogueQueue = [];
-    this.dialogueCallback = null;
+    this.messageActive = false;
+    this.messageCallback = null;
 
-    this.initDOM();
-    this.bindEvents();
+    // Combat log lines
+    this.combatLogLines = [];
+    this.currentCombatMonster = null;
+
+    this.bindDOMEvents();
   }
 
-  initDOM() {
-    this.container = document.getElementById('ui-container');
-  }
+  bindDOMEvents() {
+    if (typeof document === 'undefined') return;
 
-  bindEvents() {
-    // Audio toggle
+    const msgWin = document.getElementById('message-window');
+    if (msgWin) {
+      msgWin.addEventListener('click', () => {
+        if (this.messageActive && !this.game.combat.inCombat) {
+          this.advanceMessage();
+        }
+      });
+    }
+
     const audioBtn = document.getElementById('btn-audio-toggle');
     if (audioBtn) {
       audioBtn.addEventListener('click', () => {
-        const isMuted = soundEngine.toggleMute();
-        audioBtn.textContent = isMuted ? '🔇 Audio: OFF' : '🔊 Audio: ON';
+        soundEngine.init();
+        const muted = soundEngine.toggleMute();
+        audioBtn.textContent = muted ? 'AUDIO: OFF' : 'AUDIO: ON';
       });
     }
 
-    // Dialogue box click to advance
-    const dialogueBox = document.getElementById('dialogue-box');
-    if (dialogueBox) {
-      dialogueBox.addEventListener('click', () => {
-        this.advanceDialogue();
+    const saveBtn = document.getElementById('btn-save-game');
+    if (saveBtn) {
+      saveBtn.addEventListener('click', () => {
+        this.game.saveGame();
       });
     }
+  }
 
-    // Keyboard support for dialogue & menu
-    window.addEventListener('keydown', (e) => {
-      if (e.key === 'e' || e.key === 'E' || e.key === 'Enter' || e.key === ' ') {
-        if (this.isDialogueActive()) {
-          this.advanceDialogue();
-        }
-      }
-      if (e.key === 'Tab' || e.key === 'm' || e.key === 'M') {
-        e.preventDefault();
-        this.toggleInventoryModal();
-      }
+  // ==========================================================================
+  // TITLE SCREEN
+  // ==========================================================================
+  showTitleScreen(hasSave) {
+    this.mode = 'title';
+    this.titleItems = hasSave
+      ? [
+          { id: 'continue', label: 'CONTINUE A QUEST' },
+          { id: 'new',      label: 'BEGIN A NEW QUEST' },
+        ]
+      : [
+          { id: 'new',      label: 'BEGIN A NEW QUEST' },
+        ];
+    this.titleIndex = 0;
+    document.getElementById('title-screen')?.classList.remove('hidden');
+    document.getElementById('status-box')?.classList.add('hidden');
+    this.renderTitleOptions();
+  }
+
+  renderTitleOptions() {
+    const container = document.getElementById('title-options');
+    if (!container) return;
+    container.innerHTML = '';
+    this.titleItems.forEach((item, idx) => {
+      const row = document.createElement('div');
+      row.className = `sub-option-row ${idx === this.titleIndex ? 'selected' : ''}`;
+      row.innerHTML = `<div class="sub-option-left"><span class="cursor-glyph">▶</span><span>${item.label}</span></div>`;
+      row.onclick = () => {
+        this.titleIndex = idx;
+        this.confirmTitleSelection();
+      };
+      container.appendChild(row);
     });
   }
 
-  updateHUD() {
+  confirmTitleSelection() {
+    const chosen = this.titleItems[this.titleIndex];
+    if (!chosen) return;
+    soundEngine.init();
+    soundEngine.resume();
+    soundEngine.playSFX('menu_select');
+    document.getElementById('title-screen')?.classList.add('hidden');
+    document.getElementById('status-box')?.classList.remove('hidden');
+    this.mode = 'none';
+    if (chosen.id === 'continue') {
+      this.game.loadSavedGame();
+    } else {
+      this.game.startNewGame();
+    }
+  }
+
+  // ==========================================================================
+  // STATUS BOX (Left HUD) & DETAILED STATUS WINDOW
+  // ==========================================================================
+  updateStatusWindow() {
+    if (typeof document === 'undefined') return;
     const p = this.game.player;
     if (!p) return;
 
-    // Health & Mana
-    const hpEl = document.getElementById('hud-hp-val');
-    const hpBar = document.getElementById('hud-hp-bar');
-    if (hpEl && hpBar) {
-      hpEl.textContent = `${p.stats.hp} / ${p.stats.maxHp}`;
-      const hpPct = Math.max(0, Math.min(100, (p.stats.hp / p.stats.maxHp) * 100));
-      hpBar.style.width = `${hpPct}%`;
-      hpBar.style.backgroundColor = hpPct < 25 ? '#ef4444' : (hpPct < 50 ? '#f59e0b' : '#22c55e');
+    const setTxt = (id, v) => {
+      const el = document.getElementById(id);
+      if (el) el.textContent = String(v);
+    };
+
+    setTxt('status-name', p.stats.name);
+    setTxt('stat-lv', p.stats.level);
+    setTxt('stat-hp', p.stats.hp);
+    setTxt('stat-mp', p.stats.mp);
+    setTxt('stat-g', p.stats.gold);
+    setTxt('stat-e', p.stats.exp);
+
+    const isLow = p.stats.hp <= Math.ceil(p.stats.maxHp * 0.25);
+    const box = document.getElementById('status-box');
+    if (box) {
+      box.classList.toggle('low-hp', isLow);
     }
 
-    const mpEl = document.getElementById('hud-mp-val');
-    const mpBar = document.getElementById('hud-mp-bar');
-    if (mpEl && mpBar) {
-      mpEl.textContent = `${p.stats.mp} / ${p.stats.maxMp}`;
-      const mpPct = p.stats.maxMp > 0 ? (p.stats.mp / p.stats.maxMp) * 100 : 0;
-      mpBar.style.width = `${mpPct}%`;
-    }
-
-    // Level, Gold, EXP
-    const lvlEl = document.getElementById('hud-level');
-    if (lvlEl) lvlEl.textContent = `LV ${p.stats.level}`;
-
-    const goldEl = document.getElementById('hud-gold');
-    if (goldEl) goldEl.textContent = `${p.stats.gold} G`;
-
-    const expEl = document.getElementById('hud-exp');
-    if (expEl) expEl.textContent = `EXP: ${p.stats.exp} / ${p.stats.nextExp}`;
-
-    // Weapon & Armor
-    const gearEl = document.getElementById('hud-gear');
-    if (gearEl) gearEl.textContent = `${p.stats.weapon} | ${p.stats.armor}`;
-
-    // Compass update (Rotate toward north or Gwaelin's Love target)
-    const compassNeedle = document.getElementById('compass-needle');
-    if (compassNeedle && this.game.camera) {
-      const dir = new THREE.Vector3();
-      this.game.camera.getWorldDirection(dir);
-      const angle = Math.atan2(dir.x, dir.z);
-      compassNeedle.style.transform = `rotate(${-angle}rad)`;
-    }
-
-    // Day/Night time indicator
-    const timeIcon = document.getElementById('hud-time-icon');
-    if (timeIcon && this.game.sky) {
-      const t = this.game.sky.timeOfDay;
-      if (t >= 0.22 && t < 0.28) timeIcon.textContent = '🌅 Dawn';
-      else if (t >= 0.28 && t < 0.70) timeIcon.textContent = '☀️ Day';
-      else if (t >= 0.70 && t < 0.78) timeIcon.textContent = '🌇 Sunset';
-      else timeIcon.textContent = '🌙 Night';
+    const loc = document.getElementById('location-label');
+    if (loc && this.game.currentMap) {
+      loc.textContent = this.game.currentMap.name.toUpperCase();
     }
   }
 
-  // --- Dialogue System ---
-  showDialogue(speaker, lines, callback = null) {
-    this.currentDialogueQueue = [...lines];
-    this.dialogueCallback = callback;
+  openStatusDetail() {
+    const p = this.game.player;
+    const el = document.getElementById('status-detail-content');
+    const win = document.getElementById('status-detail-window');
+    if (!el || !win) return;
 
-    const box = document.getElementById('dialogue-box');
-    const speakerEl = document.getElementById('dialogue-speaker');
-    if (box && speakerEl) {
-      box.classList.remove('hidden');
-      speakerEl.textContent = speaker;
-      this.displayNextDialogueLine();
-    }
+    const nextExpStr = p.stats.level >= 30 ? 'MAX' : p.stats.nextExp;
+    const relics = [];
+    if (p.inventory.sunstone) relics.push('SUNSTONE');
+    if (p.inventory.staffOfRain) relics.push('STAFF OF RAIN');
+    if (p.inventory.erdrickToken) relics.push("ERDRICK'S TOKEN");
+    if (p.inventory.rainbowDrop) relics.push('RAINBOW DROP');
+    if (p.inventory.silverHarp) relics.push('SILVER HARP');
+    if (p.inventory.fairyFlute) relics.push('FAIRY FLUTE');
+    if (p.inventory.gwaelinLove) relics.push("GWAELIN'S LOVE");
+
+    el.innerHTML = `
+      <div class="stat-row"><span>STRENGTH</span><span>${p.stats.strength}</span></div>
+      <div class="stat-row"><span>AGILITY</span><span>${p.stats.agility}</span></div>
+      <div class="stat-row"><span>MAX HP</span><span>${p.stats.maxHp}</span></div>
+      <div class="stat-row"><span>MAX MP</span><span>${p.stats.maxMp}</span></div>
+      <div class="stat-row"><span>ATTACK</span><span>${p.getAttackPower()}</span></div>
+      <div class="stat-row"><span>DEFENSE</span><span>${p.getDefensePower()}</span></div>
+      <div class="stat-row"><span>NEXT LV</span><span>${nextExpStr}</span></div>
+      <div class="detail-divider"></div>
+      <div class="stat-row"><span>WEAPON</span><span>${p.stats.weapon}</span></div>
+      <div class="stat-row"><span>ARMOR</span><span>${p.stats.armor}</span></div>
+      <div class="stat-row"><span>SHIELD</span><span>${p.stats.shield}</span></div>
+      <div class="detail-divider"></div>
+      <div style="font-size: 9px; color: #bcbcbc;">KEYS:${p.inventory.magicKeys} HERBS:${p.inventory.herbs}</div>
+      ${relics.length ? `<div style="font-size: 8px; color: #f8b800; margin-top: 4px;">${relics.join(', ')}</div>` : ''}
+    `;
+
+    this.closeAllFieldWindows();
+    win.classList.remove('hidden');
+    this.mode = 'status';
   }
 
-  displayNextDialogueLine() {
-    if (this.currentDialogueQueue.length === 0) {
-      this.hideDialogue();
-      if (this.dialogueCallback) {
-        this.dialogueCallback();
-        this.dialogueCallback = null;
-      }
+  // ==========================================================================
+  // MAIN 2x4 COMMAND MENU
+  // ==========================================================================
+  openCommandMenu(defaultCommandId = 'talk') {
+    const idx = FIELD_COMMANDS.findIndex(c => c.id === defaultCommandId);
+    this.cmdIndex = idx >= 0 ? idx : 0;
+    this.closeAllFieldWindows();
+    document.getElementById('command-menu')?.classList.remove('hidden');
+    this.mode = 'command';
+    this.renderCommandMenu();
+    soundEngine.playSFX('menu_select');
+  }
+
+  renderCommandMenu() {
+    const grid = document.getElementById('command-grid');
+    if (!grid) return;
+    grid.innerHTML = '';
+    FIELD_COMMANDS.forEach((cmd, idx) => {
+      const btn = document.createElement('div');
+      btn.className = `menu-option ${idx === this.cmdIndex ? 'selected' : ''}`;
+      btn.innerHTML = `<span class="cursor-glyph">▶</span><span>${cmd.label}</span>`;
+      btn.onclick = () => {
+        this.cmdIndex = idx;
+        this.confirmFieldCommand();
+      };
+      grid.appendChild(btn);
+    });
+  }
+
+  confirmFieldCommand() {
+    const cmd = FIELD_COMMANDS[this.cmdIndex];
+    if (!cmd) return;
+    soundEngine.playSFX('menu_select');
+    this.game.executeFieldCommand(cmd.id);
+  }
+
+  closeAllFieldWindows() {
+    document.getElementById('command-menu')?.classList.add('hidden');
+    document.getElementById('status-detail-window')?.classList.add('hidden');
+    document.getElementById('sub-menu')?.classList.add('hidden');
+  }
+
+  closeMenusToField() {
+    this.closeAllFieldWindows();
+    this.mode = 'none';
+  }
+
+  // ==========================================================================
+  // GENERIC SUBMENU (Spells, Items, Shops, Choices)
+  // ==========================================================================
+  openSubMenu(title, items, returnMode = 'command') {
+    this.subTitle = title;
+    this.subItems = items;
+    this.subIndex = 0;
+    this.subReturnMode = returnMode;
+
+    if (returnMode === 'command' || returnMode === 'none') {
+      document.getElementById('status-detail-window')?.classList.add('hidden');
+    }
+
+    const menu = document.getElementById('sub-menu');
+    const titleEl = document.getElementById('sub-menu-title');
+    if (titleEl) titleEl.textContent = title;
+    if (menu) menu.classList.remove('hidden');
+
+    this.mode = this.game.combat.inCombat ? 'combat_sub' : 'sub_menu';
+    this.renderSubMenu();
+  }
+
+  renderSubMenu() {
+    const list = document.getElementById('sub-menu-list');
+    if (!list) return;
+    list.innerHTML = '';
+
+    if (this.subItems.length === 0) {
+      const empty = document.createElement('div');
+      empty.style.color = '#7c7c7c';
+      empty.textContent = 'NONE';
+      list.appendChild(empty);
       return;
     }
 
-    const line = this.currentDialogueQueue.shift();
-    const textEl = document.getElementById('dialogue-text');
-    if (!textEl) return;
+    this.subItems.forEach((item, idx) => {
+      const row = document.createElement('div');
+      row.className = `sub-option-row ${idx === this.subIndex ? 'selected' : ''} ${item.disabled ? 'disabled' : ''}`;
+      const rightTxt = item.rightText ? `<span>${item.rightText}</span>` : '';
+      row.innerHTML = `
+        <div class="sub-option-left">
+          <span class="cursor-glyph">▶</span>
+          <span>${item.label}</span>
+        </div>
+        ${rightTxt}
+      `;
+      row.onclick = () => {
+        this.subIndex = idx;
+        this.confirmSubMenuSelection();
+      };
+      list.appendChild(row);
+    });
+  }
 
-    if (this.typewriterTimer) clearInterval(this.typewriterTimer);
-    textEl.textContent = '';
+  confirmSubMenuSelection() {
+    if (this.subItems.length === 0) {
+      this.cancelSubMenu();
+      return;
+    }
+    const item = this.subItems[this.subIndex];
+    if (!item) return;
+    if (item.disabled) {
+      soundEngine.playSFX('bump');
+      return;
+    }
+    soundEngine.playSFX('menu_select');
+    if (item.onSelect) {
+      item.onSelect();
+    }
+  }
 
-    let charIdx = 0;
+  cancelSubMenu() {
+    soundEngine.playSFX('menu_cursor');
+    document.getElementById('sub-menu')?.classList.add('hidden');
+    if (this.game.combat.inCombat) {
+      this.mode = 'combat_cmd';
+      this.renderCombatCommands();
+    } else if (this.subReturnMode === 'command') {
+      this.mode = 'command';
+      document.getElementById('command-menu')?.classList.remove('hidden');
+      this.renderCommandMenu();
+    } else {
+      this.closeMenusToField();
+    }
+  }
+
+  openChoiceMenu(title, yesLabel, noLabel, onYes, onNo) {
+    this.openSubMenu(title, [
+      {
+        label: yesLabel,
+        onSelect: () => {
+          document.getElementById('sub-menu')?.classList.add('hidden');
+          this.mode = 'none';
+          onYes?.();
+        },
+      },
+      {
+        label: noLabel,
+        onSelect: () => {
+          document.getElementById('sub-menu')?.classList.add('hidden');
+          this.mode = 'none';
+          onNo?.();
+        },
+      },
+    ], 'none');
+  }
+
+  openShopMenu(shop) {
+    const p = this.game.player;
+    const items = shop.items.map(entry => {
+      let label = entry.name || entry.id;
+      let statsNote = '';
+      if (entry.kind === 'weapon') statsNote = `+${WEAPONS[entry.id].atk}A`;
+      else if (entry.kind === 'armor') statsNote = `+${ARMORS[entry.id].def}D`;
+      else if (entry.kind === 'shield') statsNote = `+${SHIELDS[entry.id].def}D`;
+
+      return {
+        label: statsNote ? `${label} (${statsNote})` : label,
+        rightText: `${entry.price}G`,
+        disabled: p.stats.gold < entry.price,
+        onSelect: () => {
+          if (p.stats.gold < entry.price) {
+            soundEngine.playSFX('bump');
+            return;
+          }
+          if (entry.kind === 'item' && entry.id === 'herb' && p.inventory.herbs >= 6) {
+            this.queueMessages(["Thou canst not carry more than 6 Herbs."], () => this.openShopMenu(shop));
+            return;
+          }
+          if (entry.kind === 'item' && entry.id === 'magicKey' && p.inventory.magicKeys >= 6) {
+            this.queueMessages(["Thou canst not carry more than 6 Magic Keys."], () => this.openShopMenu(shop));
+            return;
+          }
+
+          p.stats.gold -= entry.price;
+          soundEngine.playSFX('chest_open');
+
+          if (entry.kind === 'weapon') p.stats.weapon = entry.id;
+          else if (entry.kind === 'armor') p.stats.armor = entry.id;
+          else if (entry.kind === 'shield') p.stats.shield = entry.id;
+          else if (entry.kind === 'accessory') p.inventory[entry.id] = true;
+          else if (entry.kind === 'item') {
+            if (entry.id === 'herb') p.inventory.herbs++;
+            else if (entry.id === 'torch') p.inventory.torches++;
+            else if (entry.id === 'magicKey') p.inventory.magicKeys++;
+            else if (entry.id === 'fairyWater') p.inventory.fairyWater++;
+            else if (entry.id === 'wings') p.inventory.wings++;
+          }
+
+          this.updateStatusWindow();
+          document.getElementById('sub-menu')?.classList.add('hidden');
+          this.queueMessages([`Thou hast purchased ${entry.name || entry.id}!`], () => {
+            this.openChoiceMenu("ANYTHING ELSE?", "YES", "NO", () => this.openShopMenu(shop), () => {
+              this.queueMessages(["Thank thee! Fare thee well!"]);
+            });
+          });
+        },
+      };
+    });
+
+    items.push({
+      label: 'LEAVE',
+      onSelect: () => {
+        document.getElementById('sub-menu')?.classList.add('hidden');
+        this.mode = 'none';
+      },
+    });
+
+    this.openSubMenu(shop.title, items, 'none');
+  }
+
+  // ==========================================================================
+  // MESSAGE / DIALOGUE SYSTEM (Typewriter Box)
+  // ==========================================================================
+  isMessageActive() {
+    return this.messageActive;
+  }
+
+  queueMessages(lines, onComplete = null) {
+    if (!lines || lines.length === 0) {
+      onComplete?.();
+      return;
+    }
+    this.closeAllFieldWindows();
+    this.messageQueue = [...lines];
+    this.messageCallback = onComplete;
+    this.messageActive = true;
+    document.getElementById('message-window')?.classList.remove('hidden');
+    this.showNextQueuedMessage();
+  }
+
+  showNextQueuedMessage() {
+    if (this.typewriterTimer) {
+      clearInterval(this.typewriterTimer);
+      this.typewriterTimer = null;
+    }
+
+    if (this.messageQueue.length === 0) {
+      this.hideMessageWindow();
+      const cb = this.messageCallback;
+      this.messageCallback = null;
+      if (cb) cb();
+      return;
+    }
+
+    this.currentLine = this.messageQueue.shift();
+    this.charIdx = 0;
+
+    const textEl = document.getElementById('message-text');
+    const advEl = document.getElementById('message-advance');
+    if (textEl) textEl.textContent = '';
+    if (advEl) advEl.classList.add('hidden');
+
     this.typewriterTimer = setInterval(() => {
-      if (charIdx < line.length) {
-        textEl.textContent += line[charIdx];
-        if (charIdx % 3 === 0) soundEngine.playSFX('text_beep');
-        charIdx++;
+      if (this.charIdx < this.currentLine.length) {
+        if (textEl) textEl.textContent += this.currentLine[this.charIdx];
+        if (this.charIdx % 2 === 0 && this.currentLine[this.charIdx] !== ' ') {
+          soundEngine.playSFX('text_beep');
+        }
+        this.charIdx++;
       } else {
         clearInterval(this.typewriterTimer);
         this.typewriterTimer = null;
+        if (advEl) advEl.classList.remove('hidden');
       }
-    }, 24);
+    }, 22);
   }
 
-  advanceDialogue() {
+  advanceMessage() {
+    if (!this.messageActive) return;
+
     if (this.typewriterTimer) {
-      // If still typing, complete current line instantly
+      // Finish typing line immediately
       clearInterval(this.typewriterTimer);
       this.typewriterTimer = null;
-      const textEl = document.getElementById('dialogue-text');
-      // Already filled or advance
-    }
-    soundEngine.playSFX('menu_select');
-    this.displayNextDialogueLine();
-  }
-
-  hideDialogue() {
-    const box = document.getElementById('dialogue-box');
-    if (box) box.classList.add('hidden');
-    if (this.typewriterTimer) clearInterval(this.typewriterTimer);
-  }
-
-  isDialogueActive() {
-    const box = document.getElementById('dialogue-box');
-    return box && !box.classList.contains('hidden');
-  }
-
-  // --- Interaction Prompt Floating Widget ---
-  showInteractionPrompt(text) {
-    const prompt = document.getElementById('interaction-prompt');
-    if (prompt) {
-      prompt.classList.remove('hidden');
-      prompt.innerHTML = `<span class="key-badge">E</span> ${text}`;
-    }
-  }
-
-  hideInteractionPrompt() {
-    const prompt = document.getElementById('interaction-prompt');
-    if (prompt) prompt.classList.add('hidden');
-  }
-
-  // --- Toast Notifications ---
-  showToast(message) {
-    const toast = document.getElementById('toast-notification');
-    if (toast) {
-      toast.textContent = message;
-      toast.classList.remove('hidden');
-      toast.classList.add('show');
-
-      setTimeout(() => {
-        toast.classList.remove('show');
-        setTimeout(() => toast.classList.add('hidden'), 400);
-      }, 3500);
-    }
-  }
-
-  // --- Combat UI ---
-  showCombatUI(monster) {
-    const cUI = document.getElementById('combat-overlay');
-    if (cUI) {
-      cUI.classList.remove('hidden');
-      document.getElementById('combat-enemy-name').textContent = monster.name;
-      this.updateCombatEnemyHP(monster);
-      document.getElementById('combat-log-content').innerHTML = '';
-      this.closeCombatSubmenus();
-      this.renderCombatSpellList();
-      this.renderCombatItemList();
-    }
-  }
-
-  hideCombatUI() {
-    const cUI = document.getElementById('combat-overlay');
-    if (cUI) cUI.classList.add('hidden');
-    this.closeCombatSubmenus();
-  }
-
-  updateCombatEnemyHP(monster) {
-    if (!monster) return;
-    const hpText = document.getElementById('combat-enemy-hp');
-    if (hpText) {
-      const cur = Math.max(0, monster.currentHp);
-      hpText.textContent = `HP: ${cur} / ${monster.maxHp}`;
-    }
-    const hpBar = document.getElementById('combat-enemy-hp-bar');
-    if (hpBar) {
-      const pct = Math.max(0, Math.min(100, (monster.currentHp / monster.maxHp) * 100));
-      hpBar.style.width = `${pct}%`;
-      if (pct < 30) {
-        hpBar.classList.add('danger');
-      } else {
-        hpBar.classList.remove('danger');
-      }
-    }
-  }
-
-  showMonsterDamagePopup(dmg, isCritical) {
-    const container = document.getElementById('combat-monster-container');
-    if (!container) return;
-    const popup = document.createElement('div');
-    popup.className = `damage-popup ${isCritical ? 'crit' : ''}`;
-    popup.textContent = `-${dmg}`;
-    popup.style.left = `${45 + (Math.random() - 0.5) * 25}%`;
-    popup.style.top = `${25 + (Math.random() - 0.5) * 15}%`;
-    container.appendChild(popup);
-    setTimeout(() => popup.remove(), 1100);
-  }
-
-  showPlayerDamagePopup(text, isHeal) {
-    const hud = document.querySelector('.hero-badge');
-    if (!hud) return;
-    const popup = document.createElement('div');
-    popup.className = `damage-popup ${isHeal ? 'heal' : ''}`;
-    popup.textContent = text;
-    popup.style.left = '45px';
-    popup.style.top = '12px';
-    hud.appendChild(popup);
-    setTimeout(() => popup.remove(), 1100);
-  }
-
-  toggleCombatSpellMenu() {
-    if (!this.game.combat.inCombat || !this.game.combat.isPlayerTurn) return;
-    const spellMenu = document.getElementById('combat-spell-menu');
-    const itemMenu = document.getElementById('combat-item-menu');
-    if (!spellMenu) return;
-
-    if (itemMenu) itemMenu.classList.add('hidden');
-
-    if (spellMenu.classList.contains('hidden')) {
-      this.renderCombatSpellList();
-      spellMenu.classList.remove('hidden');
-      soundEngine.playSFX('menu_select');
-    } else {
-      spellMenu.classList.add('hidden');
-      soundEngine.playSFX('menu_move');
-    }
-  }
-
-  toggleCombatItemMenu() {
-    if (!this.game.combat.inCombat || !this.game.combat.isPlayerTurn) return;
-    const spellMenu = document.getElementById('combat-spell-menu');
-    const itemMenu = document.getElementById('combat-item-menu');
-    if (!itemMenu) return;
-
-    if (spellMenu) spellMenu.classList.add('hidden');
-
-    if (itemMenu.classList.contains('hidden')) {
-      this.renderCombatItemList();
-      itemMenu.classList.remove('hidden');
-      soundEngine.playSFX('menu_select');
-    } else {
-      itemMenu.classList.add('hidden');
-      soundEngine.playSFX('menu_move');
-    }
-  }
-
-  closeCombatSubmenus() {
-    const spellMenu = document.getElementById('combat-spell-menu');
-    const itemMenu = document.getElementById('combat-item-menu');
-    let closed = false;
-    if (spellMenu && !spellMenu.classList.contains('hidden')) {
-      spellMenu.classList.add('hidden');
-      closed = true;
-    }
-    if (itemMenu && !itemMenu.classList.contains('hidden')) {
-      itemMenu.classList.add('hidden');
-      closed = true;
-    }
-    return closed;
-  }
-
-  addCombatLog(text) {
-    const log = document.getElementById('combat-log-content');
-    if (log) {
-      const p = document.createElement('div');
-      p.className = 'combat-log-entry';
-      p.textContent = `▶ ${text}`;
-      log.appendChild(p);
-      log.scrollTop = log.scrollHeight;
-    }
-  }
-
-  triggerMonsterHitEffect(isCritical) {
-    const container = document.getElementById('combat-monster-container');
-    if (container) {
-      container.classList.add(isCritical ? 'crit-flash' : 'hit-flash');
-      setTimeout(() => {
-        container.classList.remove('crit-flash', 'hit-flash');
-      }, 400);
-    }
-  }
-
-  triggerPlayerDamageFlash() {
-    const flash = document.getElementById('damage-screen-flash');
-    if (flash) {
-      flash.classList.remove('hidden');
-      flash.classList.add('flash-active');
-      setTimeout(() => {
-        flash.classList.remove('flash-active');
-        flash.classList.add('hidden');
-      }, 300);
-    }
-  }
-
-  renderCombatSpellList() {
-    const list = document.getElementById('combat-spell-menu');
-    if (!list) return;
-    list.innerHTML = '';
-    const p = this.game.player;
-
-    const spellCosts = {
-      HEAL: 3,
-      HURT: 2,
-      SLEEP: 2,
-      RADIANT: 3,
-      STOPSPELL: 2,
-      HEALMORE: 8,
-      HURTMORE: 5
-    };
-
-    if (p.spells.length === 0) {
-      const emptyMsg = document.createElement('div');
-      emptyMsg.className = 'menu-empty';
-      emptyMsg.textContent = 'No spells learned yet!';
-      list.appendChild(emptyMsg);
-    } else {
-      p.spells.forEach(spell => {
-        const cost = spellCosts[spell] || 0;
-        const canAfford = p.stats.mp >= cost;
-        const btn = document.createElement('button');
-        btn.className = 'dw-menu-btn';
-        btn.textContent = `${spell} (${cost} MP)`;
-        if (!canAfford) {
-          btn.style.opacity = '0.5';
-          btn.style.cursor = 'not-allowed';
-          btn.onclick = () => {
-            soundEngine.playSFX('menu_move');
-            this.showToast(`Requires ${cost} MP! (Thou hast ${p.stats.mp})`);
-          };
-        } else {
-          btn.onclick = () => {
-            this.closeCombatSubmenus();
-            this.game.combat.executeSpell(spell);
-          };
-        }
-        list.appendChild(btn);
-      });
-    }
-
-    // Always provide a Back button
-    const backBtn = document.createElement('button');
-    backBtn.className = 'dw-menu-btn';
-    backBtn.style.color = '#f87171';
-    backBtn.textContent = '◀ Back';
-    backBtn.onclick = () => {
-      soundEngine.playSFX('menu_move');
-      this.closeCombatSubmenus();
-    };
-    list.appendChild(backBtn);
-  }
-
-  renderCombatItemList() {
-    const list = document.getElementById('combat-item-menu');
-    if (!list) return;
-    list.innerHTML = '';
-    const p = this.game.player;
-    let hasItems = false;
-
-    if (p.inventory.herbs > 0) {
-      hasItems = true;
-      const btn = document.createElement('button');
-      btn.className = 'dw-menu-btn';
-      btn.textContent = `Medicinal Herb (x${p.inventory.herbs})`;
-      btn.onclick = () => {
-        this.closeCombatSubmenus();
-        this.game.combat.executeItem('herb');
-      };
-      list.appendChild(btn);
-    }
-
-    if (p.inventory.fairyFlute) {
-      hasItems = true;
-      const btn = document.createElement('button');
-      btn.className = 'dw-menu-btn';
-      btn.textContent = 'Fairy Flute';
-      btn.onclick = () => {
-        this.closeCombatSubmenus();
-        this.game.combat.executeItem('flute');
-      };
-      list.appendChild(btn);
-    }
-
-    if (p.inventory.torches > 0) {
-      hasItems = true;
-      const btn = document.createElement('button');
-      btn.className = 'dw-menu-btn';
-      btn.textContent = `Throw Torch (x${p.inventory.torches})`;
-      btn.onclick = () => {
-        this.closeCombatSubmenus();
-        this.game.combat.executeItem('torch');
-      };
-      list.appendChild(btn);
-    }
-
-    if (!hasItems) {
-      const emptyMsg = document.createElement('div');
-      emptyMsg.className = 'menu-empty';
-      emptyMsg.textContent = 'No usable items in bag!';
-      list.appendChild(emptyMsg);
-    }
-
-    // Always provide a Back button
-    const backBtn = document.createElement('button');
-    backBtn.className = 'dw-menu-btn';
-    backBtn.style.color = '#f87171';
-    backBtn.textContent = '◀ Back';
-    backBtn.onclick = () => {
-      soundEngine.playSFX('menu_move');
-      this.closeCombatSubmenus();
-    };
-    list.appendChild(backBtn);
-  }
-
-  // --- Modals (Shop, Inn, Mini-games, Inventory) ---
-  showShopModal(shopType) {
-    const modal = document.getElementById('shop-modal');
-    const title = document.getElementById('shop-title');
-    const list = document.getElementById('shop-items-list');
-    if (!modal || !list) return;
-
-    modal.classList.remove('hidden');
-    list.innerHTML = '';
-
-    const p = this.game.player;
-
-    if (shopType === 'weapon') {
-      title.textContent = 'Garrick’s Armory & Weapons';
-      const wares = [
-        { id: 'Club', name: 'Oak Club', price: 60, type: 'weapon', atk: 4 },
-        { id: 'Copper Sword', name: 'Copper Sword', price: 180, type: 'weapon', atk: 10 },
-        { id: 'Broad Sword', name: 'Broad Sword', price: 560, type: 'weapon', atk: 20 },
-        { id: 'Half Plate', name: 'Half Plate Armor', price: 300, type: 'armor', def: 12 },
-        { id: 'Silver Shield', name: 'Silver Shield', price: 800, type: 'shield', def: 16 }
-      ];
-
-      wares.forEach(item => {
-        const row = document.createElement('div');
-        row.className = 'shop-row';
-        row.innerHTML = `
-          <div class="shop-item-name">${item.name} (${item.atk ? '+' + item.atk + ' ATK' : '+' + item.def + ' DEF'})</div>
-          <div class="shop-item-price">${item.price} G</div>
-        `;
-        const buyBtn = document.createElement('button');
-        buyBtn.className = 'dw-btn-small';
-        buyBtn.textContent = 'Buy';
-        buyBtn.onclick = () => {
-          if (p.stats.gold >= item.price) {
-            p.stats.gold -= item.price;
-            soundEngine.playSFX('chest_open');
-            if (item.type === 'weapon') {
-              p.stats.weapon = item.id;
-              p.stats.attack = 4 + item.atk;
-            } else if (item.type === 'armor') {
-              p.stats.armor = item.id;
-              p.stats.defense = 4 + item.def;
-            }
-            this.updateHUD();
-            this.showToast(`Purchased and equipped ${item.name}!`);
-          } else {
-            soundEngine.playSFX('menu_move');
-            this.showToast("Thou dost not have enough gold coins!");
-          }
-        };
-        row.appendChild(buyBtn);
-        list.appendChild(row);
-      });
-    } else {
-      title.textContent = 'Fiona’s Alchemical Dispensary';
-      const wares = [
-        { id: 'herb', name: 'Medicinal Herb (restores 30 HP)', price: 24 },
-        { id: 'torch', name: 'Spruce Torch (lights dark caves)', price: 8 },
-        { id: 'key', name: 'Magic Key (unlocks royal doors)', price: 45 }
-      ];
-
-      wares.forEach(item => {
-        const row = document.createElement('div');
-        row.className = 'shop-row';
-        row.innerHTML = `
-          <div class="shop-item-name">${item.name}</div>
-          <div class="shop-item-price">${item.price} G</div>
-        `;
-        const buyBtn = document.createElement('button');
-        buyBtn.className = 'dw-btn-small';
-        buyBtn.textContent = 'Buy';
-        buyBtn.onclick = () => {
-          if (p.stats.gold >= item.price) {
-            p.stats.gold -= item.price;
-            soundEngine.playSFX('chest_open');
-            if (item.id === 'herb') p.inventory.herbs++;
-            if (item.id === 'torch') {
-              p.inventory.torches++;
-              p.setTorchEquipped(true);
-            }
-            if (item.id === 'key') p.inventory.magicKeys++;
-            this.updateHUD();
-            this.showToast(`Purchased ${item.name}!`);
-          } else {
-            soundEngine.playSFX('menu_move');
-            this.showToast("Thou dost not have enough gold coins!");
-          }
-        };
-        row.appendChild(buyBtn);
-        list.appendChild(row);
-      });
-    }
-  }
-
-  closeShopModal() {
-    const modal = document.getElementById('shop-modal');
-    if (modal) modal.classList.add('hidden');
-    soundEngine.playSFX('menu_move');
-  }
-
-  showInnModal() {
-    const modal = document.getElementById('inn-modal');
-    if (!modal) return;
-    modal.classList.remove('hidden');
-  }
-
-  closeInnModal() {
-    const modal = document.getElementById('inn-modal');
-    if (modal) modal.classList.add('hidden');
-    soundEngine.playSFX('menu_move');
-  }
-
-  confirmRestInn() {
-    const p = this.game.player;
-    if (p.stats.gold < 6) {
-      soundEngine.playSFX('menu_move');
-      this.showToast("Resting at the Inn requires 6 Gold Coins!");
+      const textEl = document.getElementById('message-text');
+      const advEl = document.getElementById('message-advance');
+      if (textEl) textEl.textContent = this.currentLine;
+      if (advEl) advEl.classList.remove('hidden');
       return;
     }
-    p.stats.gold -= 6;
-    p.stats.hp = p.stats.maxHp;
-    p.stats.mp = p.stats.maxMp;
-    this.closeInnModal();
-    soundEngine.playSFX('heal_spell');
-    if (this.game.sky) {
-      this.game.sky.setTime(0.32); // Morning sun
+
+    soundEngine.playSFX('menu_cursor');
+    this.showNextQueuedMessage();
+  }
+
+  hideMessageWindow() {
+    this.messageActive = false;
+    if (this.typewriterTimer) {
+      clearInterval(this.typewriterTimer);
+      this.typewriterTimer = null;
     }
-    this.updateHUD();
-    this.showToast("Rested comfortably at the Inn! HP and MP are fully restored. Morning arrives!");
-  }
-
-  // --- Campfire Modal ---
-  showCampfireModal() {
-    const modal = document.getElementById('campfire-modal');
-    if (modal) modal.classList.remove('hidden');
-  }
-
-  closeCampfireModal() {
-    const modal = document.getElementById('campfire-modal');
-    if (modal) modal.classList.add('hidden');
-    soundEngine.playSFX('menu_move');
-  }
-
-  // --- Fairy Flute Modal ---
-  showFluteModal() {
-    const modal = document.getElementById('flute-modal');
-    if (modal) modal.classList.remove('hidden');
-  }
-
-  closeFluteModal() {
-    const modal = document.getElementById('flute-modal');
-    if (modal) modal.classList.add('hidden');
-    soundEngine.playSFX('menu_move');
-  }
-
-  // --- Lucky Lotto Modal ---
-  showLottoModal() {
-    const modal = document.getElementById('lotto-modal');
-    if (modal) modal.classList.remove('hidden');
-  }
-
-  closeLottoModal() {
-    const modal = document.getElementById('lotto-modal');
-    if (modal) modal.classList.add('hidden');
-    soundEngine.playSFX('menu_move');
-  }
-
-  // --- Slime Archery Modal ---
-  showArcheryModal(archeryGame) {
-    const modal = document.getElementById('archery-modal');
-    if (!modal) return;
-    modal.classList.remove('hidden');
-    this.updateArcheryTimer(archeryGame.timeLeft, archeryGame.score);
-  }
-
-  updateArcheryTimer(timeLeft, score) {
-    const tEl = document.getElementById('archery-timer');
-    const sEl = document.getElementById('archery-score');
-    if (tEl) tEl.textContent = `Time: ${timeLeft}s`;
-    if (sEl) sEl.textContent = `Score: ${score}`;
-  }
-
-  triggerTargetHitAnim(index) {
-    const targetEl = document.getElementById(`archery-target-${index}`);
-    if (targetEl) {
-      targetEl.classList.add('target-hit');
-      setTimeout(() => targetEl.classList.remove('target-hit'), 300);
+    document.getElementById('message-window')?.classList.add('hidden');
+    document.getElementById('message-advance')?.classList.add('hidden');
+    if (!this.game.combat.inCombat && this.mode !== 'sub_menu') {
+      this.mode = 'none';
     }
   }
 
-  showArcheryResult(score, goldWon) {
-    const resultBox = document.getElementById('archery-result');
-    if (resultBox) {
-      resultBox.innerHTML = `
-        <h3>Training Complete!</h3>
-        <p>Final Score: <strong>${score}</strong></p>
-        <p>Prize Awarded: <strong>+${goldWon} Gold Coins</strong>!</p>
-        <button class="dw-btn" onclick="window.gameInstance.ui.closeArcheryModal()">Collect & Return</button>
-      `;
-      resultBox.classList.remove('hidden');
+  // ==========================================================================
+  // FIRST-PERSON COMBAT UI
+  // ==========================================================================
+  showCombat(monster) {
+    this.closeAllFieldWindows();
+    this.hideMessageWindow();
+
+    this.currentCombatMonster = monster;
+    this.combatLogLines = [];
+    this.combatCmdIndex = 0;
+    this.mode = 'combat_cmd';
+
+    document.getElementById('combat-overlay')?.classList.remove('hidden');
+    document.getElementById('message-window')?.classList.remove('hidden');
+    document.getElementById('message-advance')?.classList.add('hidden');
+
+    this.updateCombatMonster(monster);
+    this.renderCombatCommands();
+  }
+
+  updateCombatMonster(monster) {
+    this.currentCombatMonster = monster;
+    const nameEl = document.getElementById('combat-monster-name');
+    if (nameEl) nameEl.textContent = monster.name.toUpperCase();
+    this.game.renderer?.renderCombatMonster(monster.type);
+  }
+
+  hideCombat() {
+    this.currentCombatMonster = null;
+    document.getElementById('combat-overlay')?.classList.add('hidden');
+    document.getElementById('sub-menu')?.classList.add('hidden');
+    document.getElementById('message-window')?.classList.add('hidden');
+    this.mode = 'none';
+  }
+
+  addCombatLog(line) {
+    this.combatLogLines.push(line);
+    if (this.combatLogLines.length > 3) {
+      this.combatLogLines = this.combatLogLines.slice(-3);
+    }
+    const textEl = document.getElementById('message-text');
+    if (textEl) {
+      textEl.textContent = this.combatLogLines.join('\n');
     }
   }
 
-  closeArcheryModal() {
-    const modal = document.getElementById('archery-modal');
-    if (modal) modal.classList.add('hidden');
-    const resultBox = document.getElementById('archery-result');
-    if (resultBox) resultBox.classList.add('hidden');
-    this.updateHUD();
-  }
-
-  // --- Inventory & Lore Modal ---
-  toggleInventoryModal() {
-    const modal = document.getElementById('inventory-modal');
-    if (!modal) return;
-    if (modal.classList.contains('hidden')) {
-      this.renderInventory();
-      modal.classList.remove('hidden');
-      soundEngine.playSFX('menu_select');
-    } else {
-      modal.classList.add('hidden');
-      soundEngine.playSFX('menu_move');
-    }
-  }
-
-  renderInventory() {
-    const p = this.game.player;
-    const statsBox = document.getElementById('inv-stats');
-    const itemsBox = document.getElementById('inv-items');
-    const relicsBox = document.getElementById('inv-relics');
-
-    if (statsBox) {
-      statsBox.innerHTML = `
-        <div><strong>Hero:</strong> ${p.stats.name} (LV ${p.stats.level})</div>
-        <div><strong>HP:</strong> ${p.stats.hp} / ${p.stats.maxHp}</div>
-        <div><strong>MP:</strong> ${p.stats.mp} / ${p.stats.maxMp}</div>
-        <div><strong>Attack:</strong> ${p.stats.attack}</div>
-        <div><strong>Defense:</strong> ${p.stats.defense}</div>
-        <div><strong>Agility:</strong> ${p.stats.agility}</div>
-        <div><strong>Gold:</strong> ${p.stats.gold} G</div>
-        <div><strong>Weapon:</strong> ${p.stats.weapon}</div>
-        <div><strong>Armor:</strong> ${p.stats.armor}</div>
-      `;
-    }
-
-    if (itemsBox) {
-      itemsBox.innerHTML = `
-        <div class="inv-badge">Medicinal Herbs: ${p.inventory.herbs}</div>
-        <div class="inv-badge">Torches: ${p.inventory.torches}</div>
-        <div class="inv-badge">Magic Keys: ${p.inventory.magicKeys}</div>
-      `;
-    }
-
-    if (relicsBox) {
-      relicsBox.innerHTML = `
-        <div class="relic-item ${p.inventory.sunstone ? 'found' : 'missing'}">☀️ Sunstone: ${p.inventory.sunstone ? 'Acquired' : 'Locked in Tantegel'}</div>
-        <div class="relic-item ${p.inventory.staffOfRain ? 'found' : 'missing'}">🌧️ Staff of Rain: ${p.inventory.staffOfRain ? 'Acquired' : 'At Rain Shrine'}</div>
-        <div class="relic-item ${p.inventory.rainbowDrop ? 'found' : 'missing'}">🌈 Rainbow Drop: ${p.inventory.rainbowDrop ? 'Forged' : 'Not yet combined'}</div>
-        <div class="relic-item ${p.inventory.fairyFlute ? 'found' : 'missing'}">🎵 Fairy Flute: ${p.inventory.fairyFlute ? 'Unearthed' : 'Buried at Kol Spring'}</div>
-        <div class="relic-item ${p.inventory.gwaelinLove ? 'found' : 'missing'}">💖 Gwaelin's Love: ${p.inventory.gwaelinLove ? 'Blessed' : 'Rescue Princess Gwaelin'}</div>
-      `;
-    }
-  }
-
-  closeAllModals() {
-    const modalIds = [
-      'shop-modal',
-      'inn-modal',
-      'campfire-modal',
-      'lotto-modal',
-      'flute-modal',
-      'archery-modal',
-      'inv-modal'
-    ];
-    let closed = false;
-    modalIds.forEach(id => {
-      const el = document.getElementById(id);
-      if (el && !el.classList.contains('hidden')) {
-        el.classList.add('hidden');
-        closed = true;
-      }
+  renderCombatCommands() {
+    const grid = document.getElementById('combat-cmd-grid');
+    if (!grid) return;
+    grid.innerHTML = '';
+    COMBAT_COMMANDS.forEach((cmd, idx) => {
+      const btn = document.createElement('div');
+      btn.className = `menu-option ${idx === this.combatCmdIndex ? 'selected' : ''}`;
+      btn.innerHTML = `<span class="cursor-glyph">▶</span><span>${cmd.label}</span>`;
+      btn.onclick = () => {
+        this.combatCmdIndex = idx;
+        this.confirmCombatCommand();
+      };
+      grid.appendChild(btn);
     });
-    if (closed) soundEngine.playSFX('menu_move');
-    return closed;
+  }
+
+  confirmCombatCommand() {
+    if (this.game.combat.turnLocked || !this.game.combat.isPlayerTurn) return;
+    const cmd = COMBAT_COMMANDS[this.combatCmdIndex];
+    if (!cmd) return;
+    soundEngine.playSFX('menu_select');
+
+    if (cmd.id === 'fight') {
+      this.game.combat.executeAttack();
+    } else if (cmd.id === 'run') {
+      this.game.combat.executeRun();
+    } else if (cmd.id === 'spell') {
+      this.openCombatSpellMenu();
+    } else if (cmd.id === 'item') {
+      this.openCombatItemMenu();
+    }
+  }
+
+  openCombatSpellMenu() {
+    const p = this.game.player;
+    const combatSpells = ['HEAL', 'HURT', 'SLEEP', 'STOPSPELL', 'HEALMORE', 'HURTMORE'];
+    const learned = p.spells.filter(s => combatSpells.includes(s));
+
+    const items = learned.map(spell => {
+      const cost = SPELL_COSTS[spell] || 0;
+      return {
+        label: spell,
+        rightText: `${cost}`,
+        disabled: p.stats.mp < cost,
+        onSelect: () => {
+          document.getElementById('sub-menu')?.classList.add('hidden');
+          this.mode = 'combat_cmd';
+          this.game.combat.executeSpell(spell);
+        },
+      };
+    });
+
+    this.openSubMenu('SPELL', items, 'combat_cmd');
+  }
+
+  openCombatItemMenu() {
+    const p = this.game.player;
+    const items = [];
+    if (p.inventory.herbs > 0) {
+      items.push({
+        label: 'HERB',
+        rightText: `x${p.inventory.herbs}`,
+        onSelect: () => {
+          document.getElementById('sub-menu')?.classList.add('hidden');
+          this.mode = 'combat_cmd';
+          this.game.combat.executeItem('herb');
+        },
+      });
+    }
+    if (p.inventory.fairyFlute) {
+      items.push({
+        label: 'FAIRY FLUTE',
+        onSelect: () => {
+          document.getElementById('sub-menu')?.classList.add('hidden');
+          this.mode = 'combat_cmd';
+          this.game.combat.executeItem('fairyFlute');
+        },
+      });
+    }
+    this.openSubMenu('ITEM', items, 'combat_cmd');
+  }
+
+  // ==========================================================================
+  // KEYBOARD NAVIGATION ROUTER
+  // ==========================================================================
+  handleKeyDown(code) {
+    const isUp = code === 'ArrowUp' || code === 'KeyW';
+    const isDown = code === 'ArrowDown' || code === 'KeyS';
+    const isLeft = code === 'ArrowLeft' || code === 'KeyA';
+    const isRight = code === 'ArrowRight' || code === 'KeyD';
+    const isConfirm = code === 'Enter' || code === 'Space' || code === 'KeyZ' || code === 'KeyE';
+    const isCancel = code === 'Escape' || code === 'KeyX' || code === 'Backspace';
+
+    // 1. Title screen
+    if (this.mode === 'title') {
+      if (isUp || isDown) {
+        this.titleIndex = (this.titleIndex + 1) % this.titleItems.length;
+        soundEngine.init();
+        soundEngine.playSFX('menu_cursor');
+        this.renderTitleOptions();
+      } else if (isConfirm) {
+        this.confirmTitleSelection();
+      }
+      return true;
+    }
+
+    // 2. Dialogue / Message window active (outside combat)
+    if (this.messageActive && !this.game.combat.inCombat) {
+      if (isConfirm || isCancel) {
+        this.advanceMessage();
+      }
+      return true;
+    }
+
+    // 3. Combat submenus & commands
+    if (this.game.combat.inCombat) {
+      if (this.game.combat.turnLocked || !this.game.combat.isPlayerTurn) return true;
+
+      if (this.mode === 'combat_sub') {
+        if (isUp && this.subItems.length > 0) {
+          this.subIndex = (this.subIndex - 1 + this.subItems.length) % this.subItems.length;
+          soundEngine.playSFX('menu_cursor');
+          this.renderSubMenu();
+        } else if (isDown && this.subItems.length > 0) {
+          this.subIndex = (this.subIndex + 1) % this.subItems.length;
+          soundEngine.playSFX('menu_cursor');
+          this.renderSubMenu();
+        } else if (isConfirm) {
+          this.confirmSubMenuSelection();
+        } else if (isCancel) {
+          this.cancelSubMenu();
+        }
+        return true;
+      }
+
+      if (this.mode === 'combat_cmd') {
+        if (isLeft || isRight) {
+          this.combatCmdIndex ^= 1;
+          soundEngine.playSFX('menu_cursor');
+          this.renderCombatCommands();
+        } else if (isUp || isDown) {
+          this.combatCmdIndex = (this.combatCmdIndex + 2) % 4;
+          soundEngine.playSFX('menu_cursor');
+          this.renderCombatCommands();
+        } else if (isConfirm) {
+          this.confirmCombatCommand();
+        }
+        return true;
+      }
+      return true;
+    }
+
+    // 4. Status Detail Window
+    if (this.mode === 'status') {
+      if (isConfirm || isCancel) {
+        soundEngine.playSFX('menu_cursor');
+        document.getElementById('status-detail-window')?.classList.add('hidden');
+        this.mode = 'command';
+        document.getElementById('command-menu')?.classList.remove('hidden');
+        this.renderCommandMenu();
+      }
+      return true;
+    }
+
+    // 5. Submenu (Field Spell / Item / Shop / Yes-No)
+    if (this.mode === 'sub_menu') {
+      if (isUp && this.subItems.length > 0) {
+        this.subIndex = (this.subIndex - 1 + this.subItems.length) % this.subItems.length;
+        soundEngine.playSFX('menu_cursor');
+        this.renderSubMenu();
+      } else if (isDown && this.subItems.length > 0) {
+        this.subIndex = (this.subIndex + 1) % this.subItems.length;
+        soundEngine.playSFX('menu_cursor');
+        this.renderSubMenu();
+      } else if (isConfirm) {
+        this.confirmSubMenuSelection();
+      } else if (isCancel) {
+        this.cancelSubMenu();
+      }
+      return true;
+    }
+
+    // 6. Main 2x4 Command Menu
+    if (this.mode === 'command') {
+      if (isLeft || isRight) {
+        this.cmdIndex ^= 1;
+        soundEngine.playSFX('menu_cursor');
+        this.renderCommandMenu();
+      } else if (isUp) {
+        this.cmdIndex = (this.cmdIndex - 2 + 8) % 8;
+        soundEngine.playSFX('menu_cursor');
+        this.renderCommandMenu();
+      } else if (isDown) {
+        this.cmdIndex = (this.cmdIndex + 2) % 8;
+        soundEngine.playSFX('menu_cursor');
+        this.renderCommandMenu();
+      } else if (isConfirm) {
+        this.confirmFieldCommand();
+      } else if (isCancel) {
+        soundEngine.playSFX('menu_cursor');
+        this.closeMenusToField();
+      }
+      return true;
+    }
+
+    // 7. Exploring field: Confirm opens COMMAND menu (smart-highlighting context command on E)
+    if (this.mode === 'none' && isConfirm) {
+      const smartId = code === 'KeyE' ? this.game.getContextualCommandId() : 'talk';
+      this.openCommandMenu(smartId);
+      return true;
+    }
+
+    return false;
   }
 }

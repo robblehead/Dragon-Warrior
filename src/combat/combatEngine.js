@@ -1,398 +1,504 @@
-// Turn-Based & Cinematic Combat System (Faithful to Dragon Warrior NES Mechanics)
-import { soundEngine } from '../audio/synth.js';
-import { musicManager } from '../audio/music.js';
+// Authentic NES Dragon Warrior Turn-Based Combat System
+import { createMonsterInstance, OVERWORLD_ENCOUNTER_ZONES, DUNGEON_ENCOUNTERS } from '../entities/monsters.js';
+import { getOverworldZone } from '../world/maps.js';
+import { SPELL_COSTS } from '../entities/player.js';
 
 export class CombatEngine {
   constructor(game) {
     this.game = game;
     this.inCombat = false;
     this.currentMonster = null;
-    this.currentMonsterRef = null;
+    this.activeBossId = null;
     this.isPlayerTurn = true;
-    this.enemyAsleep = 0; // Sleep turn counter
-    this.isBossEncounter = false;
-  }
+    this.turnLocked = false;
+    this.instantMode = false; // For synchronous unit testing
 
-  startEncounter(monsterData, isBoss = false, monsterRef = null) {
-    this.inCombat = true;
-    this.isBossEncounter = isBoss;
-    this.currentMonsterRef = monsterRef;
-    this.currentMonster = {
-      ...monsterData,
-      currentHp: monsterData.hp
-    };
-    this.isPlayerTurn = true;
     this.enemyAsleep = 0;
+    this.enemyStopspell = false;
+    this.playerAsleep = 0;
+    this.playerStopspell = false;
+  }
 
-    // Switch music to battle theme
-    musicManager.playTrack('battle');
+  /**
+   * Evaluates random step encounters on overworld and dungeon tiles.
+   */
+  rollRandomEncounter(map, tileType, x, y) {
+    const player = this.game.player;
+    if (!map || player.inventory.ballOfLight) return null;
+    if (!map.isOverworld && !DUNGEON_ENCOUNTERS[map.id]) return null;
 
-    // Draw Erdrick's Sword for battle
-    if (this.game.player && typeof this.game.player.setWeaponDrawn === 'function') {
-      this.game.player.setWeaponDrawn(true);
+    let rate = 0;
+    if (tileType === 'SWAMP' || tileType === 'BARRIER_FLOOR') rate = 0.125;
+    else if (tileType === 'FOREST' || tileType === 'HILL') rate = 0.095;
+    else if (tileType === 'DESERT' || tileType === 'STONE_FLOOR') rate = 0.075;
+    else if (tileType === 'GRASS' || tileType === 'BRIDGE') rate = 0.06;
+    else return null;
+
+    if (Math.random() >= rate) return null;
+
+    let pool;
+    if (map.isOverworld) {
+      const zone = getOverworldZone(x, y);
+      pool = OVERWORLD_ENCOUNTER_ZONES[zone] || OVERWORLD_ENCOUNTER_ZONES[0];
+    } else {
+      pool = DUNGEON_ENCOUNTERS[map.id];
     }
 
-    // Trigger Combat UI overlay
-    if (this.game.ui) {
-      this.game.ui.showCombatUI(this.currentMonster);
-      this.game.ui.addCombatLog(`A ${this.currentMonster.name} draws near!`);
+    const chosenType = pool[Math.floor(Math.random() * pool.length)];
+    const candidate = createMonsterInstance(chosenType);
+
+    // REPEL / Fairy Water wards off weak monsters
+    if (player.repelSteps > 0 && candidate.defense < Math.floor(player.getAttackPower() / 2)) {
+      return null;
+    }
+
+    return chosenType;
+  }
+
+  startEncounter(monsterType, bossId = null) {
+    this.inCombat = true;
+    this.activeBossId = bossId;
+    this.currentMonster = createMonsterInstance(monsterType);
+    this.isPlayerTurn = true;
+    this.turnLocked = false;
+
+    this.enemyAsleep = 0;
+    this.enemyStopspell = false;
+    this.playerAsleep = 0;
+    this.playerStopspell = false;
+
+    const musicTrack = (monsterType === 'dragonlord_1' || monsterType === 'dragonlord_2')
+      ? 'dragonlord'
+      : 'battle';
+    this.game.music?.playTrack(musicTrack);
+
+    this.game.ui?.showCombat(this.currentMonster);
+    this.game.ui?.addCombatLog(`A ${this.currentMonster.name} draws near!`);
+
+    // Check if player wakes up or starts awake (standard turn 1 is player's unless ambushed)
+  }
+
+  schedule(fn, ms) {
+    if (this.instantMode) {
+      fn();
+    } else {
+      setTimeout(fn, ms);
     }
   }
 
-  // Action 1: FIGHT (Melee attack)
+  checkPlayerWakeBeforeAction() {
+    if (this.playerAsleep > 0) {
+      this.playerAsleep--;
+      if (this.playerAsleep === 0 || Math.random() < 0.35) {
+        this.playerAsleep = 0;
+        this.game.ui?.addCombatLog(`${this.game.player.stats.name} awakens!`);
+        return true;
+      }
+      this.game.ui?.addCombatLog(`${this.game.player.stats.name} is still asleep!`);
+      this.turnLocked = true;
+      this.isPlayerTurn = false;
+      this.schedule(() => this.executeEnemyTurn(), 750);
+      return false;
+    }
+    return true;
+  }
+
+  // Command 1: FIGHT
   executeAttack() {
-    if (!this.inCombat || !this.isPlayerTurn) return;
+    if (!this.inCombat || !this.isPlayerTurn || this.turnLocked) return;
+    if (!this.checkPlayerWakeBeforeAction()) return;
+
     this.isPlayerTurn = false;
+    this.turnLocked = true;
 
     const player = this.game.player;
     const monster = this.currentMonster;
 
-    // Determine hit, critical hit (1/16 chance), and damage
-    const isCritical = Math.random() < 0.08;
-    soundEngine.playSFX(isCritical ? 'critical_hit' : 'sword_attack');
+    const isCrit = Math.random() < (1 / 32);
+    const atk = player.getAttackPower();
+    let dmg;
 
-    let baseDamage = Math.max(1, Math.floor((player.stats.attack - monster.defense * 0.5) * (0.8 + Math.random() * 0.4)));
-    if (isCritical) {
-      baseDamage = Math.floor(player.stats.attack * 1.5 + Math.random() * 4);
-      this.game.ui?.addCombatLog("A tremendous hit! Excellent move!");
+    if (isCrit) {
+      dmg = Math.max(1, Math.floor(atk * (0.55 + Math.random() * 0.45)));
+      this.game.sound?.playSFX('critical_hit');
+      this.game.ui?.addCombatLog("Excellent move!");
     } else {
+      const diff = atk - Math.floor(monster.defense / 2);
+      dmg = Math.max(1, Math.floor(Math.max(1, diff) * (0.5 + Math.random() * 0.5)));
+      this.game.sound?.playSFX('attack_hit');
       this.game.ui?.addCombatLog(`${player.stats.name} attacks!`);
     }
 
-    monster.currentHp -= baseDamage;
-    this.game.ui?.addCombatLog(`The ${monster.name} takes ${baseDamage} points of damage!`);
-    this.game.ui?.triggerMonsterHitEffect(isCritical);
-    if (this.game.ui?.updateCombatEnemyHP) this.game.ui.updateCombatEnemyHP(monster);
-    if (this.game.ui?.showMonsterDamagePopup) this.game.ui.showMonsterDamagePopup(baseDamage, isCritical);
+    monster.currentHp -= dmg;
+    this.game.renderer?.triggerMonsterBlink(420);
+    this.game.ui?.addCombatLog(`The ${monster.name}'s Hit Points have been reduced by ${dmg}!`);
 
-    // Check monster death
     if (monster.currentHp <= 0) {
-      this.handleVictory();
+      this.schedule(() => this.handleEnemyDefeated(), 700);
       return;
     }
 
-    // Schedule enemy turn
-    setTimeout(() => {
-      this.executeEnemyTurn();
-    }, 1100);
+    this.schedule(() => this.executeEnemyTurn(), 850);
   }
 
-  // Action 2: SPELL
+  // Command 2: SPELL
   executeSpell(spellName) {
-    if (!this.inCombat || !this.isPlayerTurn) return;
+    if (!this.inCombat || !this.isPlayerTurn || this.turnLocked) return;
+    if (!this.checkPlayerWakeBeforeAction()) return;
+
     const player = this.game.player;
     const monster = this.currentMonster;
 
-    const spellCosts = {
-      HEAL: 3,
-      HURT: 2,
-      SLEEP: 2,
-      RADIANT: 3,
-      STOPSPELL: 2,
-      HEALMORE: 8,
-      HURTMORE: 5
-    };
+    if (this.playerStopspell) {
+      this.game.ui?.addCombatLog("Thy spell hath been blocked!");
+      this.isPlayerTurn = false;
+      this.turnLocked = true;
+      this.schedule(() => this.executeEnemyTurn(), 800);
+      return;
+    }
 
-    const cost = spellCosts[spellName] || 0;
+    const cost = SPELL_COSTS[spellName] || 0;
     if (player.stats.mp < cost) {
-      this.game.ui?.addCombatLog("Thy MP is insufficient to cast that spell!");
+      this.game.ui?.addCombatLog("Thy MP is too low!");
       return;
     }
 
     player.stats.mp -= cost;
     this.isPlayerTurn = false;
-    soundEngine.playSFX('spell_cast');
+    this.turnLocked = true;
+    this.game.sound?.playSFX('spell_cast');
+    this.game.renderer?.triggerFlash('#fcfcfc', 240);
+    this.game.ui?.updateStatusWindow();
 
     if (spellName === 'HEAL') {
-      const recovered = Math.floor(20 + Math.random() * 12);
-      player.stats.hp = Math.min(player.stats.maxHp, player.stats.hp + recovered);
-      soundEngine.playSFX('heal_spell');
-      this.game.particles?.spawnSpellBurst(player.position, 'heal');
-      this.game.ui?.addCombatLog(`${player.stats.name} chants HEAL! Restored ${recovered} HP!`);
-      this.game.ui?.updateHUD();
-      if (this.game.ui?.showPlayerDamagePopup) this.game.ui.showPlayerDamagePopup(`+${recovered}`, true);
+      const heal = 15 + Math.floor(Math.random() * 8);
+      player.stats.hp = Math.min(player.stats.maxHp, player.stats.hp + heal);
+      this.game.sound?.playSFX('heal');
+      this.game.ui?.addCombatLog(`${player.stats.name} chants the spell of HEAL!`);
+      this.game.ui?.addCombatLog(`Thy Hit Points increase by ${heal}!`);
+      this.game.ui?.updateStatusWindow();
     } else if (spellName === 'HEALMORE') {
-      const recovered = Math.floor(85 + Math.random() * 15);
-      player.stats.hp = Math.min(player.stats.maxHp, player.stats.hp + recovered);
-      soundEngine.playSFX('heal_spell');
-      this.game.particles?.spawnSpellBurst(player.position, 'heal');
-      this.game.ui?.addCombatLog(`${player.stats.name} chants HEALMORE! Restored ${recovered} HP!`);
-      this.game.ui?.updateHUD();
-      if (this.game.ui?.showPlayerDamagePopup) this.game.ui.showPlayerDamagePopup(`+${recovered}`, true);
+      const heal = 85 + Math.floor(Math.random() * 16);
+      player.stats.hp = Math.min(player.stats.maxHp, player.stats.hp + heal);
+      this.game.sound?.playSFX('heal');
+      this.game.ui?.addCombatLog(`${player.stats.name} chants the spell of HEALMORE!`);
+      this.game.ui?.addCombatLog(`Thy Hit Points are restored by ${heal}!`);
+      this.game.ui?.updateStatusWindow();
     } else if (spellName === 'HURT') {
-      const dmg = Math.floor(8 + Math.random() * 7);
-      monster.currentHp -= dmg;
-      soundEngine.playSFX('hurt_spell');
-      this.game.particles?.spawnSpellBurst(player.position, 'hurt');
-      this.game.ui?.addCombatLog(`${player.stats.name} chants HURT! Fireball strikes for ${dmg} damage!`);
-      this.game.ui?.triggerMonsterHitEffect(false);
-      if (this.game.ui?.updateCombatEnemyHP) this.game.ui.updateCombatEnemyHP(monster);
-      if (this.game.ui?.showMonsterDamagePopup) this.game.ui.showMonsterDamagePopup(dmg, false);
-    } else if (spellName === 'HURTMORE') {
-      const dmg = Math.floor(48 + Math.random() * 18);
-      monster.currentHp -= dmg;
-      soundEngine.playSFX('hurt_spell');
-      this.game.particles?.spawnSpellBurst(player.position, 'hurtmore');
-      this.game.ui?.addCombatLog(`${player.stats.name} chants HURTMORE! Lightning tears into the ${monster.name} for ${dmg} damage!`);
-      this.game.ui?.triggerMonsterHitEffect(true);
-      if (this.game.ui?.updateCombatEnemyHP) this.game.ui.updateCombatEnemyHP(monster);
-      if (this.game.ui?.showMonsterDamagePopup) this.game.ui.showMonsterDamagePopup(dmg, true);
-    } else if (spellName === 'SLEEP') {
-      soundEngine.playSFX('spell_cast');
-      this.game.particles?.spawnSpellBurst(player.position, 'sleep');
-      if (Math.random() < 0.7) {
-        this.enemyAsleep = 3;
-        this.game.ui?.addCombatLog(`The ${monster.name} falls into a deep slumber!`);
+      this.game.ui?.addCombatLog(`${player.stats.name} chants the spell of HURT!`);
+      if (Math.random() < monster.hurtResist) {
+        this.game.ui?.addCombatLog(`But the spell hath no effect on the ${monster.name}!`);
       } else {
-        this.game.ui?.addCombatLog(`The spell had no effect upon the ${monster.name}!`);
+        const dmg = 8 + Math.floor(Math.random() * 6);
+        monster.currentHp -= dmg;
+        this.game.renderer?.triggerMonsterBlink(420);
+        this.game.ui?.addCombatLog(`The ${monster.name} takes ${dmg} points of damage!`);
       }
-    } else if (spellName === 'RADIANT') {
-      soundEngine.playSFX('spell_cast');
-      this.game.particles?.spawnSpellBurst(player.position, 'radiant');
-      player.setRadiantActive(true);
-      this.game.ui?.addCombatLog("A radiant burst illuminates the cavern and dazzles the foe!");
+    } else if (spellName === 'HURTMORE') {
+      this.game.ui?.addCombatLog(`${player.stats.name} chants the spell of HURTMORE!`);
+      if (Math.random() < monster.hurtResist) {
+        this.game.ui?.addCombatLog(`But the spell hath no effect on the ${monster.name}!`);
+      } else {
+        const dmg = 58 + Math.floor(Math.random() * 9);
+        monster.currentHp -= dmg;
+        this.game.renderer?.triggerMonsterBlink(420);
+        this.game.ui?.addCombatLog(`Blazing fire engulfs the ${monster.name} for ${dmg} damage!`);
+      }
+    } else if (spellName === 'SLEEP') {
+      this.game.ui?.addCombatLog(`${player.stats.name} chants the spell of SLEEP!`);
+      if (Math.random() > monster.sleepResist) {
+        this.enemyAsleep = 3;
+        this.game.ui?.addCombatLog(`The ${monster.name} falls asleep!`);
+      } else {
+        this.game.ui?.addCombatLog(`But the spell failed!`);
+      }
+    } else if (spellName === 'STOPSPELL') {
+      this.game.ui?.addCombatLog(`${player.stats.name} chants STOPSPELL!`);
+      if (Math.random() > monster.stopspellResist) {
+        this.enemyStopspell = true;
+        this.game.ui?.addCombatLog(`The ${monster.name}'s spell hath been sealed!`);
+      } else {
+        this.game.ui?.addCombatLog(`But it hath no effect!`);
+      }
+    } else {
+      this.game.ui?.addCombatLog(`Nothing happened.`);
     }
 
-    this.game.ui?.updateHUD();
-
     if (monster.currentHp <= 0) {
-      this.handleVictory();
+      this.schedule(() => this.handleEnemyDefeated(), 750);
       return;
     }
 
-    setTimeout(() => {
-      this.executeEnemyTurn();
-    }, 1200);
+    this.schedule(() => this.executeEnemyTurn(), 900);
   }
 
-  // Action 3: ITEM
-  executeItem(itemType) {
-    if (!this.inCombat || !this.isPlayerTurn) return;
+  // Command 3: ITEM
+  executeItem(itemId) {
+    if (!this.inCombat || !this.isPlayerTurn || this.turnLocked) return;
+    if (!this.checkPlayerWakeBeforeAction()) return;
+
     const player = this.game.player;
     const monster = this.currentMonster;
 
-    if (itemType === 'herb') {
+    if (itemId === 'herb') {
       if (player.inventory.herbs <= 0) {
-        this.game.ui?.addCombatLog("Thou hast no herbs left!");
+        this.game.ui?.addCombatLog("Thou hast no Medicinal Herbs!");
         return;
       }
       player.inventory.herbs--;
-      const heal = Math.floor(25 + Math.random() * 10);
+      const heal = 23 + Math.floor(Math.random() * 8);
       player.stats.hp = Math.min(player.stats.maxHp, player.stats.hp + heal);
-      soundEngine.playSFX('heal_spell');
-      this.game.ui?.addCombatLog(`${player.stats.name} uses a Medicinal Herb! Restored ${heal} HP!`);
-      this.game.ui?.updateHUD();
-      if (this.game.ui?.showPlayerDamagePopup) this.game.ui.showPlayerDamagePopup(`+${heal}`, true);
-      this.game.ui?.renderCombatItemList();
-    } else if (itemType === 'flute') {
-      if (!player.inventory.fairyFlute) {
-        this.game.ui?.addCombatLog("Thou dost not possess the Fairy Flute!");
-        return;
+      this.game.sound?.playSFX('heal');
+      this.game.ui?.addCombatLog(`${player.stats.name} uses a Medicinal Herb!`);
+      this.game.ui?.addCombatLog(`Restored ${heal} Hit Points!`);
+      this.game.ui?.updateStatusWindow();
+    } else if (itemId === 'fairyFlute') {
+      if (!player.inventory.fairyFlute) return;
+      this.game.sound?.playSFX('flute');
+      this.game.ui?.addCombatLog(`${player.stats.name} blows upon the Fairy Flute!`);
+      if (monster.weakToFlute) {
+        this.enemyAsleep = 4;
+        this.game.ui?.addCombatLog(`Hearing the melody, the ${monster.name} falls into a deep sleep!`);
+      } else {
+        this.game.ui?.addCombatLog(`The sweet melody echoes, yet the ${monster.name} stirs not.`);
       }
-      soundEngine.playSFX('flute_note');
-      this.enemyAsleep = 4;
-      this.game.ui?.addCombatLog(`${player.stats.name} plays the sweet Fairy Flute! The ${monster.name} is lulled to sleep!`);
-    } else if (itemType === 'torch') {
-      if (player.inventory.torches <= 0) {
-        this.game.ui?.addCombatLog("Thou hast no torches left!");
-        return;
-      }
-      player.inventory.torches--;
-      const torchDmg = Math.floor(5 + Math.random() * 5);
-      monster.currentHp -= torchDmg;
-      soundEngine.playSFX('hurt_spell');
-      this.game.ui?.addCombatLog(`${player.stats.name} hurls a blazing torch! Scorches the ${monster.name} for ${torchDmg} damage!`);
-      this.game.ui?.triggerMonsterHitEffect(false);
-      if (this.game.ui?.updateCombatEnemyHP) this.game.ui.updateCombatEnemyHP(monster);
-      if (this.game.ui?.showMonsterDamagePopup) this.game.ui.showMonsterDamagePopup(torchDmg, false);
-      this.game.ui?.renderCombatItemList();
-
-      if (monster.currentHp <= 0) {
-        this.handleVictory();
-        return;
-      }
+    } else {
+      this.game.ui?.addCombatLog("Thou cannot use that here!");
+      return;
     }
 
     this.isPlayerTurn = false;
-    setTimeout(() => {
-      this.executeEnemyTurn();
-    }, 1100);
+    this.turnLocked = true;
+    this.schedule(() => this.executeEnemyTurn(), 900);
   }
 
-  // Action 4: RUN
+  // Command 4: RUN
   executeRun() {
-    if (!this.inCombat || !this.isPlayerTurn) return;
-    if (this.isBossEncounter) {
-      this.game.ui?.addCombatLog("Thou cannot run from this fateful destiny!");
-      return;
-    }
+    if (!this.inCombat || !this.isPlayerTurn || this.turnLocked) return;
+    if (!this.checkPlayerWakeBeforeAction()) return;
 
     const player = this.game.player;
     const monster = this.currentMonster;
-    // Classic DW escape formula: agility check
-    const canEscape = player.stats.agility * Math.random() >= monster.agility * Math.random() * 0.65;
 
-    if (canEscape) {
-      this.isPlayerTurn = false;
-      this.game.ui?.addCombatLog(`${player.stats.name} escaped successfully!`);
-      soundEngine.playSFX('stairs');
+    this.game.ui?.addCombatLog(`${player.stats.name} started to run away!`);
+    this.isPlayerTurn = false;
+    this.turnLocked = true;
 
-      // 1. Move escaped monster back towards patrol zone
-      if (this.currentMonsterRef && this.currentMonsterRef.mesh) {
-        this.currentMonsterRef.mesh.position.x = this.currentMonsterRef.originX + (Math.random() - 0.5) * 8;
-        this.currentMonsterRef.mesh.position.z = this.currentMonsterRef.originZ + (Math.random() - 0.5) * 8;
-        this.currentMonsterRef.patrolTimer = 0;
-      }
+    if (monster.runBlocked || monster.isBoss) {
+      this.game.ui?.addCombatLog("Thou cannot escape from this foe!");
+      this.schedule(() => this.executeEnemyTurn(), 800);
+      return;
+    }
 
-      // 2. Set encounter grace period (4.5s) so the player has time to walk away
-      if (this.game) {
-        this.game.combatCooldown = 4.5;
-      }
-
-      setTimeout(() => {
-        this.endCombat(false);
-      }, 750);
+    const escaped = player.stats.agility * Math.random() >= monster.agility * Math.random() * 0.5;
+    if (escaped) {
+      this.game.sound?.playSFX('stairs');
+      this.schedule(() => this.endCombat(false), 600);
     } else {
-      this.game.ui?.addCombatLog("The enemy blocked the path!");
-      this.isPlayerTurn = false;
-      setTimeout(() => {
-        this.executeEnemyTurn();
-      }, 1000);
+      this.game.ui?.addCombatLog("But the path was blocked!");
+      this.schedule(() => this.executeEnemyTurn(), 800);
     }
   }
 
-  // Enemy Turn
   executeEnemyTurn() {
     if (!this.inCombat) return;
+
     const player = this.game.player;
     const monster = this.currentMonster;
 
-    // Check if monster is sleeping
+    // Sleep check
     if (this.enemyAsleep > 0) {
       this.enemyAsleep--;
-      this.game.ui?.addCombatLog(`The ${monster.name} is still fast asleep...`);
-      this.isPlayerTurn = true;
-      return;
-    }
-
-    // Boss special attack (Flame Breath / Inferno)
-    let isFireBreath = false;
-    if (monster.type === 'green_dragon' || monster.type === 'dragonlord') {
-      if (Math.random() < 0.45) isFireBreath = true;
-    }
-
-    if (isFireBreath) {
-      soundEngine.playSFX('hurt_spell');
-      const breathDmg = Math.floor(monster.attack * 1.1 + Math.random() * 6);
-      player.stats.hp -= breathDmg;
-      this.game.ui?.addCombatLog(`The ${monster.name} spews a torrent of scorching flame!`);
-      this.game.ui?.addCombatLog(`${player.stats.name} takes ${breathDmg} points of damage!`);
-      this.game.ui?.updateHUD();
-      if (this.game.ui?.showPlayerDamagePopup) this.game.ui.showPlayerDamagePopup(`-${breathDmg}`, false);
-    } else {
-      soundEngine.playSFX('sword_attack');
-      let dmg = Math.max(1, Math.floor((monster.attack - player.stats.defense * 0.5) * (0.8 + Math.random() * 0.4)));
-      // Beginner protection: prevent early sudden deaths so player has time to learn, heal, and fight back
-      if (!this.isBossEncounter) {
-        if (player.stats.level === 1) {
-          dmg = Math.min(dmg, 3); // Max 3 dmg at Lv1 (~20% of 15 HP), ensuring at least 5 hits of survival
-        } else if (player.stats.level === 2) {
-          dmg = Math.min(dmg, 5);
-        }
+      // Golem sleeps deeply from Fairy Flute; regular sleep may wake early
+      if (!monster.weakToFlute && this.enemyAsleep > 0 && Math.random() < 0.33) {
+        this.enemyAsleep = 0;
+        this.game.ui?.addCombatLog(`The ${monster.name} awakes!`);
+      } else {
+        this.game.ui?.addCombatLog(`The ${monster.name} is fast asleep!`);
+        this.isPlayerTurn = true;
+        this.turnLocked = false;
+        return;
       }
-      player.stats.hp -= dmg;
-      this.game.ui?.addCombatLog(`The ${monster.name} attacks!`);
-      this.game.ui?.addCombatLog(`${player.stats.name} takes ${dmg} points of damage!`);
-      this.game.ui?.updateHUD();
-      if (this.game.ui?.showPlayerDamagePopup) this.game.ui.showPlayerDamagePopup(`-${dmg}`, false);
     }
 
-    this.game.ui?.triggerPlayerDamageFlash();
+    // Choose AI move
+    const moves = monster.moves || ['attack'];
+    let move = moves[Math.floor(Math.random() * moves.length)];
+    if ((move === 'hurt' || move === 'hurtmore' || move === 'sleep' || move === 'stopspell') && this.enemyStopspell) {
+      move = 'attack';
+    }
+    if (move === 'stopspell' && this.playerStopspell) move = 'attack';
+    if (move === 'sleep' && this.playerAsleep > 0) move = 'attack';
 
-    // Check Player Death
+    if (move === 'fire_breath') {
+      const raw = 16 + Math.floor(Math.random() * 8);
+      const dmg = player.hasMagicResist() ? Math.floor(raw * 0.67) : raw;
+      player.stats.hp -= dmg;
+      this.game.sound?.playSFX('hurt_spell');
+      this.game.renderer?.triggerFlash('#f83800', 260);
+      this.game.ui?.addCombatLog(`The ${monster.name} breathes scorching fire!`);
+      this.game.ui?.addCombatLog(`Thy Hit Points decreased by ${dmg}!`);
+    } else if (move === 'strong_fire_breath') {
+      const raw = 65 + Math.floor(Math.random() * 8);
+      const dmg = player.hasMagicResist() ? Math.floor(raw * 0.67) : raw;
+      player.stats.hp -= dmg;
+      this.game.sound?.playSFX('hurt_spell');
+      this.game.renderer?.triggerFlash('#f83800', 300);
+      this.game.ui?.addCombatLog(`The ${monster.name} unleashes an inferno of flame!`);
+      this.game.ui?.addCombatLog(`Thy Hit Points decreased by ${dmg}!`);
+    } else if (move === 'hurt') {
+      const raw = 5 + Math.floor(Math.random() * 8);
+      const dmg = player.hasMagicResist() ? Math.floor(raw * 0.67) : raw;
+      player.stats.hp -= dmg;
+      this.game.sound?.playSFX('hurt_spell');
+      this.game.renderer?.triggerFlash('#f83800', 240);
+      this.game.ui?.addCombatLog(`The ${monster.name} chants HURT!`);
+      this.game.ui?.addCombatLog(`Thy Hit Points decreased by ${dmg}!`);
+    } else if (move === 'hurtmore') {
+      const raw = 30 + Math.floor(Math.random() * 14);
+      const dmg = player.hasMagicResist() ? Math.floor(raw * 0.67) : raw;
+      player.stats.hp -= dmg;
+      this.game.sound?.playSFX('hurt_spell');
+      this.game.renderer?.triggerFlash('#f83800', 260);
+      this.game.ui?.addCombatLog(`The ${monster.name} chants HURTMORE!`);
+      this.game.ui?.addCombatLog(`Thy Hit Points decreased by ${dmg}!`);
+    } else if (move === 'sleep') {
+      this.game.sound?.playSFX('spell_cast');
+      this.game.ui?.addCombatLog(`The ${monster.name} chants SLEEP!`);
+      if (!player.hasMagicResist() || Math.random() < 0.35) {
+        this.playerAsleep = 2;
+        this.game.ui?.addCombatLog(`${player.stats.name} falls asleep!`);
+      } else {
+        this.game.ui?.addCombatLog(`But ${player.stats.name} resists the spell!`);
+      }
+    } else if (move === 'stopspell') {
+      this.game.sound?.playSFX('spell_cast');
+      this.game.ui?.addCombatLog(`The ${monster.name} chants STOPSPELL!`);
+      if (!player.hasMagicResist() && Math.random() < 0.5) {
+        this.playerStopspell = true;
+        this.game.ui?.addCombatLog(`${player.stats.name}'s spells are sealed!`);
+      } else {
+        this.game.ui?.addCombatLog(`But the spell failed!`);
+      }
+    } else {
+      // Physical attack
+      const def = player.getDefensePower();
+      const diff = monster.attack - Math.floor(def / 2);
+      const dmg = diff <= 0
+        ? (Math.random() < 0.5 ? 1 : 0)
+        : Math.max(1, Math.floor(diff * (0.5 + Math.random() * 0.5)));
+
+      player.stats.hp -= dmg;
+      this.game.sound?.playSFX('receive_damage');
+      if (dmg > 0) this.game.renderer?.triggerFlash('#f83800', 200);
+      this.game.ui?.addCombatLog(`The ${monster.name} attacks!`);
+      if (dmg === 0) {
+        this.game.ui?.addCombatLog(`A miss! No damage to ${player.stats.name}!`);
+      } else {
+        this.game.ui?.addCombatLog(`Thy Hit Points decreased by ${dmg}!`);
+      }
+    }
+
+    this.game.ui?.updateStatusWindow();
+
     if (player.stats.hp <= 0) {
-      this.handleDefeat();
+      player.stats.hp = 0;
+      this.game.ui?.updateStatusWindow();
+      this.schedule(() => this.handleDefeat(), 800);
       return;
     }
 
     this.isPlayerTurn = true;
+    this.turnLocked = false;
   }
 
-  handleVictory() {
-    const player = this.game.player;
+  handleEnemyDefeated() {
     const monster = this.currentMonster;
+    const player = this.game.player;
 
-    soundEngine.playSFX('victory');
-    this.game.ui?.addCombatLog(`Thou hast defeated the ${monster.name}!`);
-    this.game.ui?.addCombatLog(`Thou gained ${monster.exp} EXP and ${monster.gold} Gold Coins!`);
-
-    player.stats.gold += monster.gold;
-    const leveledUp = player.addExp(monster.exp);
-    this.game.ui?.updateHUD();
-
-    // Defeated roaming monster disappears and respawns later
-    if (this.currentMonsterRef && this.currentMonsterRef.mesh) {
-      this.currentMonsterRef.mesh.visible = false;
-      this.currentMonsterRef.respawnTimer = 25.0; // 25s respawn
-    }
-    if (this.game) {
-      this.game.combatCooldown = 4.0;
+    // 2-Phase Dragonlord Transformation!
+    if (monster.type === 'dragonlord_1') {
+      this.game.sound?.playSFX('critical_hit');
+      this.game.renderer?.triggerFlash('#bc00bc', 550);
+      this.currentMonster = createMonsterInstance('dragonlord_2');
+      this.enemyAsleep = 0;
+      this.enemyStopspell = false;
+      this.game.ui?.updateCombatMonster(this.currentMonster);
+      this.game.ui?.addCombatLog("The Dragonlord casts off his disguise and reveals his true form!");
+      this.isPlayerTurn = true;
+      this.turnLocked = false;
+      return;
     }
 
-    if (leveledUp) {
-      setTimeout(() => {
-        soundEngine.playSFX('level_up');
-        this.game.ui?.addCombatLog(`Courage and strength surged! ${player.stats.name} has advanced to Level ${player.stats.level}!`);
-        this.game.ui?.updateHUD();
-      }, 700);
+    this.game.sound?.playSFX('victory');
+    this.game.ui?.addCombatLog(`Thou hast done well in defeating the ${monster.name}!`);
+
+    if (monster.exp > 0 || monster.gold > 0) {
+      this.game.ui?.addCombatLog(`Thy Experience increases by ${monster.exp}.`);
+      this.game.ui?.addCombatLog(`Thy Gold increases by ${monster.gold}.`);
+      player.stats.gold += monster.gold;
+      const levelUps = player.addExp(monster.exp);
+      this.game.ui?.updateStatusWindow();
+
+      if (levelUps.length > 0) {
+        this.game.sound?.playSFX('level_up');
+        for (const lu of levelUps) {
+          this.game.ui?.addCombatLog(`Courage and wit have served thee well! Thou hast been promoted to Level ${lu.level}!`);
+          if (lu.newSpell) {
+            this.game.ui?.addCombatLog(`Thou hast learned the spell of ${lu.newSpell}!`);
+          }
+        }
+      }
     }
 
-    // Boss specific triggers
-    if (monster.type === 'green_dragon') {
-      setTimeout(() => {
-        this.game.onGreenDragonDefeated?.();
-      }, 1400);
-    } else if (monster.type === 'dragonlord') {
-      setTimeout(() => {
-        this.game.onDragonlordDefeated?.();
-      }, 1500);
+    if (this.activeBossId) {
+      this.game.defeatedBosses.add(this.activeBossId);
     }
 
-    setTimeout(() => {
-      this.endCombat(true);
-    }, 2200);
+    if (monster.type === 'dragonlord_2') {
+      this.game.defeatedBosses.add('dragonlord_final');
+      player.inventory.ballOfLight = true;
+      this.game.renderer?.triggerFlash('#fcfcfc', 700, true);
+      this.game.ui?.addCombatLog("Thou hast recovered the Ball of Light! Peace returns to Alefgard!");
+      this.schedule(() => this.endCombat(true, true), 1800);
+      return;
+    }
+
+    this.schedule(() => this.endCombat(true), 1200);
   }
 
   handleDefeat() {
-    this.game.ui?.addCombatLog("Thou art vanquished in battle...");
-    setTimeout(() => {
-      // Revival by King Lorik
+    this.game.sound?.playSFX('curse');
+    this.game.ui?.addCombatLog("Thou art dead.");
+    this.schedule(() => {
       const player = this.game.player;
+      player.stats.gold = Math.floor(player.stats.gold / 2);
       player.stats.hp = player.stats.maxHp;
       player.stats.mp = player.stats.maxMp;
-      player.position.set(0, 3.5, -28); // Back at castle
+      player.isCarryingPrincess = false;
       this.endCombat(false);
-      this.game.ui?.showToast("King Lorik hath revived thee in Tantegel Castle!");
-      this.game.ui?.updateHUD();
-    }, 2000);
+      this.game.warpTo('tantegel_throne', 5, 2, 'up');
+      this.game.ui?.queueMessages([
+        "King Lorik: \"Welcome back, brave Erdrick!\"",
+        "\"May the light restore thy life—go forth once more!\""
+      ]);
+    }, 1400);
   }
 
-  endCombat(won) {
+  endCombat(won, isDragonlordVictory = false) {
     this.inCombat = false;
     this.currentMonster = null;
-    this.currentMonsterRef = null;
+    this.activeBossId = null;
     this.isPlayerTurn = true;
-
-    // Sheathe sword back into scabbard
-    if (this.game.player && typeof this.game.player.setWeaponDrawn === 'function') {
-      this.game.player.setWeaponDrawn(false);
-    }
-
-    // Return music to appropriate location theme
+    this.turnLocked = false;
+    this.game.ui?.hideCombat();
     this.game.updateLocationMusic?.();
 
-    if (this.game.ui) {
-      this.game.ui.hideCombatUI();
+    if (isDragonlordVictory) {
+      this.game.ui?.queueMessages([
+        "The dark clouds over Alefgard scatter before the radiant Ball of Light!",
+        "Return to King Lorik at Tantegel Castle to celebrate thy eternal victory!"
+      ]);
     }
   }
 }
