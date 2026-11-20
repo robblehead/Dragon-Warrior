@@ -1,19 +1,24 @@
 {
   "name": "dragon-warrior",
-  "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "version": "2.0.0",
+  "description": "Authentic 8-bit NES Dragon Warrior recreation in HTML5 Canvas & Web Audio",
+  "main": "src/main.js",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "node test_game.js"
   },
-  "keywords": [],
+  "keywords": [
+    "dragon-warrior",
+    "nes",
+    "rpg",
+    "8-bit"
+  ],
   "author": "",
   "license": "MIT",
   "type": "module",
   "dependencies": {
-    "three": "^0.185.1",
     "vite": "^8.2.2"
   }
 }

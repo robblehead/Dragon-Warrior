@@ -1,82 +1,53 @@
-# Dragon Warrior 3D: Echoes of Alefgard 🗡️✨
+# Dragon Warrior (NES Edition)
 
-A browser-native, single-level 3D action RPG reimagining of the original NES foundational classic **Dragon Warrior** (*Dragon Quest*), inspired directly by the original 1989 NES instruction manual and realized with a "Breath of the Wild" cel-shaded visual aesthetic.
-
-Built with **Three.js** and **Vite**.
+An authentic 8-bit recreation of the 1989 NES classic **Dragon Warrior** (*Dragon Quest*), built with a native 256×240 pixel-art HTML5 Canvas renderer and a Web Audio 2A03 APU chiptune synthesizer.
 
 ---
 
-## 🌟 Features
+## Features
 
-- **Breath-of-the-Wild Caliber Visuals**: Custom Three.js cel-shading, dynamic 24-hour day/night sky with celestial transit and stars, instanced wind-swayed reactive grass (28,000+ blades) with wildflowers, shimmering water, and real-time volumetric lighting.
-- **Akira Toriyama Character Art**: Detailed hero model of Erdrick with swept golden casque horns, sapphire crest, layered knight cuirass, dragon buckle, and dynamic combat-ready stances with sword and shield.
-- **Seamless Single-Level Open World of Alefgard**:
-  - **Tantegel Castle**: Royal throne room with vaulted timber ceiling, fluted marble colonnade, heraldic Erdrick tapestries, 3-tier stepped marble dais, the Golden Dragon Throne, King Lorik, palace guards, and the royal treasury vault.
-  - **Town of Brecconary**: Half-timbered Tudor architecture, cobblestone plazas, Slime fountain, Garrick's Weaponsmith, Fiona's Alchemist, and The Travelers' Inn.
-  - **Quagmire Poison Marsh & Dark Caverns**: Hazardous swamp, underground mountain caverns, torch lighting, ancient runes, and the Green Dragon holding Princess Gwaelin captive.
-  - **Eastern Megaliths & Hot Springs**: Ancient stone henge guarding the Staff of Rain, and hidden Fairy Flute.
-  - **Western Cape & Charlock Island**: Summon the celestial Rainbow Bridge with the Rainbow Drop and confront the Dragonlord in his obsidian sanctum!
-- **Faithful Turn-Based & Cinematic Combat**:
-  - Classic Dragon Warrior commands: `[FIGHT]`, `[SPELL]`, `[ITEM]`, `[RUN]`.
-  - Spells: `HEAL`, `HURT`, `SLEEP`, `RADIANT`, `STOPSPELL`, `HEALMORE`, `HURTMORE`.
-  - EXP, Gold, Level Progression, and balanced early monster scaling.
-- **Interactive Mini-Games & Side Activities**:
-  - Slime Archery Range target shooting gallery.
-  - Lucky Lotto golden dice betting.
-  - Campfire resting and herb alchemy.
-  - Playable 5-note Fairy Flute instrument with secret melodies.
-- **Procedural Symphonic Synthesizer**: Pure Web Audio API polyphonic retro orchestral arrangements of iconic Dragon Warrior themes.
+- **Authentic 256×240 NES Pixel Art Engine**:
+  - 54-color NES hardware palette, 16×16 world & interior tiles, animated 2-frame water waves, and 2-frame directional character stepping sprites.
+  - Dynamic Hero sprite states: unarmed, sword, sword & shield, and carrying Princess Gwaelin in arms.
+  - True dungeon darkness mask: pitch-black caverns illuminated by a 3×3 `Torch` radius or decaying 7×7 `RADIANT` spell radius.
+- **Classic NES Windowed Interface & Command Menu**:
+  - Double-bordered black/white NES windows with low-HP red alert indicator.
+  - Left Status window (`LV`, `HP`, `MP`, `G`, `E`), 2×4 `COMMAND` menu (`TALK`, `SPELL`, `STATUS`, `ITEM`, `STAIRS`, `DOOR`, `SEARCH`, `TAKE`), typewriter message box, and full `STATUS` sheet.
+- **Faithful Alefgard World & Progression**:
+  - Interconnected maps: Tantegel Castle (2F, 1F, Treasury Basement), Brecconary, Garinham, Kol, Rimuldar, Cantlin, Damdara Ruins, Mountain Cave, Swamp Cave, Shrine of Rain, Shrine of the Rainbow, and Charlock Castle.
+  - Exact Level 1–30 stat curve, 10 classic spells (`HEAL` through `HURTMORE`), locked doors requiring Magic Keys, buried search relics (`Fairy Flute`, `Erdrick's Token`, `Erdrick's Armor`), and forging the `Rainbow Drop` to bridge Charlock Island.
+- **First-Person Turn-Based NES Combat**:
+  - Random terrain-weighted step encounters (`REPEL` and `Fairy Water` ward off weak foes).
+  - First-person monster portrait frame with NES hit-blink and PPU screen flash effects.
+  - Special boss mechanics: put the **Golem** to sleep with the `Fairy Flute`, defeat the **Green Dragon** to rescue Princess Gwaelin, and confront the **2-Phase Dragonlord** (Sorcerer offer -> True Dragon transformation).
+- **2A03 Chiptune Audio**:
+  - Dual Pulse (Square) + Triangle + Noise synthesizer playing chiptune scores and 8-bit sound effects.
 
 ---
 
-## 🎮 Controls
+## Controls
 
 | Key / Input | Action |
 | :--- | :--- |
-| **W, A, S, D** / **Arrow Keys** | Move Hero |
-| **Mouse Drag** / **Right-Click Drag** | Orbit Camera (360° Free Look) |
-| **Mouse Wheel** | Zoom In / Out |
-| **Space** | Jump |
-| **Shift** | Sprint |
-| **[E]** | Interact / Talk / Open Chest / Shop / Play |
-| **[F]** | Toggle Torch |
-| **[R]** | Draw / Sheathe Erdrick's Sword |
-| **[Tab]** or **[M]** | Inventory & Relics Menu |
-| **[Escape]** | Close Menus / Step Back in Combat |
-| **🔊 Audio Button** | Toggle Procedural Sound / Music |
+| **Arrow Keys** / **W A S D** | Move Hero (tile-by-tile) / Navigate menu cursor |
+| **Enter** / **Space** / **Z** / **E** | Open `COMMAND` menu / Confirm selection / Advance text |
+| **Escape** / **X** / **Backspace** | Close menu / Step back |
+| **M** | Mute / Unmute audio |
+| **Mouse Click** | Click any menu option or message box directly |
+| **SAVE Button** | Save progress to `localStorage` (`CONTINUE A QUEST` on title screen) |
 
 ---
 
-## 🚀 Getting Started
-
-### Prerequisites
-- [Node.js](https://nodejs.org/) (v18 or higher)
-- npm
-
-### Installation & Running Locally
+## Getting Started
 
 ```bash
-# Clone the repository
-git clone https://github.com/robblehead/Dragon-Warrior.git
-cd Dragon-Warrior
-
-# Install dependencies
 npm install
-
-# Start local dev server
 npm run dev
 ```
 
-Open your browser to `http://localhost:3000/` (or the port specified in terminal).
-
-### Production Build
+Run system tests and production build:
 
 ```bash
+node test_game.js
 npm run build
-npm run preview
 ```
-
----
-
-## 📜 License
-MIT License. Inspired by Dragon Warrior / Dragon Quest © Square Enix.

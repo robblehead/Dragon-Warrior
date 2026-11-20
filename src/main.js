@@ -1,694 +1,862 @@
-// Dragon Warrior 3D: Echoes of Alefgard - Master Game Orchestrator
-import * as THREE from 'three';
+// Dragon Warrior (NES Edition) - Master Game Orchestrator
 import { soundEngine } from './audio/synth.js';
 import { musicManager } from './audio/music.js';
-import { DynamicSky } from './graphics/sky.js';
-import { WindGrassField } from './graphics/grass.js';
-import { StylizedWater } from './graphics/water.js';
-import { ParticleSystem } from './graphics/particles.js';
-import { AlefgardTerrain } from './world/terrain.js';
-import { TantegelCastle } from './world/castle.js';
-import { BrecconaryTown } from './world/town.js';
-import { QuagmireCave } from './world/cave.js';
-import { AlefgardShrines } from './world/shrine.js';
-import { CharlockSanctum } from './world/charlock.js';
-import { PlayerCharacter } from './entities/player.js';
-import { NPCManager } from './entities/npcs.js';
-import { MonsterFactory } from './entities/monsters.js';
+import { NESRenderer } from './graphics/renderer.js';
+import { PlayerCharacter, ARMORS, WEAPONS } from './entities/player.js';
+import { MAPS, CHAR_TO_TILE, SOLID_TILES } from './world/maps.js';
 import { CombatEngine } from './combat/combatEngine.js';
-import { SlimeArcheryMiniGame } from './minigames/archery.js';
-import { LuckyLottoMiniGame } from './minigames/lotto.js';
-import { CampfireSystem } from './minigames/cooking.js';
-import { FairyFluteInstrument } from './minigames/flute.js';
 import { GameUI } from './ui/hud.js';
 
+const SAVE_KEY = 'dragon_warrior_nes_save_v1';
+
+const DIR_DELTAS = {
+  up:    { dx: 0, dy: -1 },
+  down:  { dx: 0, dy: 1 },
+  left:  { dx: -1, dy: 0 },
+  right: { dx: 1, dy: 0 },
+};
+
 export class DragonWarriorGame {
-  constructor() {
-    this.scene = null;
-    this.camera = null;
-    this.renderer = null;
-    this.timer = new THREE.Timer();
-    this.clock = this.timer;
-
-    // Input state
-    this.input = {
-      horizontal: 0,
-      vertical: 0,
-      jump: false,
-      sprint: false
-    };
-
-    // Camera Orbit State
-    this.cameraYaw = 0;
-    this.cameraPitch = 0.38;
-    this.cameraDistance = 7.0;
-    this.cameraInitialized = false;
-    this.isDraggingMouse = false;
-    this.previousMousePosition = { x: 0, y: 0 };
-
-    this.activeInteraction = null;
-    this.roamingMonsters = [];
-    this.combatCooldown = 0;
-    this.lastSwampDamageTime = 0;
-    this.currentZone = 'castle';
-
-    this.initEngine();
-    this.initWorld();
-    this.initInput();
-    this.initMonsters();
-    this.initUI();
-    this.startLoop();
-  }
-
-  initEngine() {
-    this.container = document.getElementById('canvas-container');
-    const width = window.innerWidth;
-    const height = window.innerHeight;
-
-    this.scene = new THREE.Scene();
-    this.scene.fog = new THREE.FogExp2(0x9bd4ff, 0.0075);
-
-    this.camera = new THREE.PerspectiveCamera(55, width / height, 0.1, 800);
-
-    this.renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
-    this.renderer.setSize(width, height);
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-    this.renderer.shadowMap.enabled = true;
-    this.renderer.shadowMap.type = THREE.PCFShadowMap;
-    this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    this.renderer.toneMappingExposure = 1.1;
-    this.renderer.outputColorSpace = THREE.SRGBColorSpace;
-    this.renderer.setClearColor(0x9bd4ff, 1.0);
-
-    this.container.appendChild(this.renderer.domElement);
-
-    window.addEventListener('resize', () => this.onWindowResize());
-  }
-
-  initWorld() {
-    // 1. Sky & Lighting
-    this.sky = new DynamicSky(this.scene);
-
-    // 2. Open-World Terrain
-    this.terrain = new AlefgardTerrain(this.scene);
-
-    // 3. Instanced Wind-Swayed Grass & Wildflowers
-    this.grass = new WindGrassField(this.scene, (x, z) => this.terrain.getHeight(x, z));
-
-    // 4. Stylized Water
-    this.water = new StylizedWater(this.scene);
-
-    // 5. Atmospheric Particles
-    this.particles = new ParticleSystem(this.scene);
-
-    // 6. World Landmarks & Structures
-    this.castle = new TantegelCastle(this.scene, this.terrain);
-    this.town = new BrecconaryTown(this.scene, this.terrain);
-    this.cave = new QuagmireCave(this.scene);
-    this.shrines = new AlefgardShrines(this.scene, this.terrain);
-    this.charlock = new CharlockSanctum(this.scene, this.terrain);
-
-    // 7. Player Character
-    this.player = new PlayerCharacter(this.scene, this.terrain);
-
-    // 8. NPCs
-    this.npcs = new NPCManager(this.scene, this.terrain);
-
-    // 9. Combat Engine & Mini-Games
+  constructor(headless = false) {
+    this.headless = headless;
+    this.sound = soundEngine;
+    this.music = musicManager;
+    this.renderer = headless ? null : new NESRenderer('nes-canvas');
+    this.player = new PlayerCharacter('ERDRICK');
     this.combat = new CombatEngine(this);
-    this.archeryGame = new SlimeArcheryMiniGame(this);
-    this.lottoGame = new LuckyLottoMiniGame(this);
-    this.campfireSystem = new CampfireSystem(this);
-    this.fairyFlute = new FairyFluteInstrument(this);
+    this.ui = headless ? null : new GameUI(this);
+
+    this.currentMapId = 'tantegel_throne';
+    this.currentMap = MAPS.tantegel_throne;
+
+    // Persistent world flags
+    this.openedChests = new Set();
+    this.openedDoors = new Set();
+    this.defeatedBosses = new Set();
+    this.rainbowBridgeBuilt = false;
+
+    // Movement input held state
+    this.heldDirs = new Set();
+    this.lastTime = 0;
+
+    if (!headless && typeof window !== 'undefined') {
+      window.gameInstance = this;
+      this.bindGlobalInput();
+      this.ui.showTitleScreen(this.hasSavedGame());
+      this.startLoop();
+    }
   }
 
-  initMonsters() {
-    // Spawn roaming 3D monsters in the wild fields of Alefgard
-    const spawns = [
-      // Gentle Slimes right outside Tantegel Castle perimeter
-      { type: 'slime', x: -6, z: -8 },
-      { type: 'slime', x: 6, z: -8 },
-      { type: 'slime', x: -14, z: 2 },
-      { type: 'slime', x: 12, z: 4 },
-      // Red Slimes in the outer fields
-      { type: 'red_slime', x: -26, z: 12 },
-      { type: 'red_slime', x: 32, z: 6 },
-      // Drakees further south in the forest groves and crags
-      { type: 'drakee', x: -22, z: 26 },
-      { type: 'drakee', x: 12, z: 32 },
-      // Skeletons patrolling near the swamp
-      { type: 'skeleton', x: 34, z: 32 },
-      { type: 'skeleton', x: 26, z: 40 }
-    ];
+  hasSavedGame() {
+    try {
+      return Boolean(localStorage.getItem(SAVE_KEY));
+    } catch {
+      return false;
+    }
+  }
 
-    spawns.forEach(s => {
-      let mMesh;
-      if (s.type === 'slime') mMesh = MonsterFactory.createSlime(0x0284c7, false);
-      else if (s.type === 'red_slime') mMesh = MonsterFactory.createSlime(0xdc2626, true);
-      else if (s.type === 'drakee') mMesh = MonsterFactory.createDrakee();
-      else if (s.type === 'skeleton') mMesh = MonsterFactory.createSkeleton();
+  saveGame() {
+    try {
+      const payload = {
+        mapId: this.currentMapId,
+        x: this.player.x,
+        y: this.player.y,
+        dir: this.player.dir,
+        stats: this.player.stats,
+        spells: this.player.spells,
+        inventory: this.player.inventory,
+        torchSteps: this.player.torchSteps,
+        radiantSteps: this.player.radiantSteps,
+        repelSteps: this.player.repelSteps,
+        isCarryingPrincess: this.player.isCarryingPrincess,
+        openedChests: [...this.openedChests],
+        openedDoors: [...this.openedDoors],
+        defeatedBosses: [...this.defeatedBosses],
+        rainbowBridgeBuilt: this.rainbowBridgeBuilt,
+      };
+      localStorage.setItem(SAVE_KEY, JSON.stringify(payload));
+      soundEngine.playSFX('menu_select');
+      if (this.ui && this.ui.mode === 'none' && !this.combat.inCombat) {
+        this.ui.queueMessages(["Thy deeds have been recorded in the Imperial Scrolls!"]);
+      }
+    } catch {
+      // Ignore storage failures
+    }
+  }
 
-      const groundY = this.terrain.getHeight(s.x, s.z);
-      mMesh.position.set(s.x, groundY, s.z);
-      this.scene.add(mMesh);
+  loadSavedGame() {
+    try {
+      const raw = localStorage.getItem(SAVE_KEY);
+      if (!raw) return this.startNewGame();
+      const data = JSON.parse(raw);
 
-      this.roamingMonsters.push({
-        mesh: mMesh,
-        originX: s.x,
-        originZ: s.z,
-        data: mMesh.userData,
-        patrolTimer: Math.random() * 10,
-        respawnTimer: 0
+      this.player = new PlayerCharacter(data.stats?.name || 'ERDRICK');
+      Object.assign(this.player.stats, data.stats || {});
+      this.player.spells = Array.isArray(data.spells) ? [...data.spells] : [];
+      Object.assign(this.player.inventory, data.inventory || {});
+      this.player.torchSteps = data.torchSteps || 0;
+      this.player.radiantSteps = data.radiantSteps || 0;
+      this.player.repelSteps = data.repelSteps || 0;
+      this.player.isCarryingPrincess = Boolean(data.isCarryingPrincess);
+
+      this.openedChests = new Set(data.openedChests || []);
+      this.openedDoors = new Set(data.openedDoors || []);
+      this.defeatedBosses = new Set(data.defeatedBosses || []);
+      this.rainbowBridgeBuilt = Boolean(data.rainbowBridgeBuilt);
+
+      this.warpTo(data.mapId || 'tantegel_throne', data.x ?? 5, data.y ?? 2, data.dir || 'up', true);
+      this.ui?.updateStatusWindow();
+      this.ui?.queueMessages([`Welcome back, ${this.player.stats.name}!`]);
+    } catch {
+      this.startNewGame();
+    }
+  }
+
+  startNewGame() {
+    this.player = new PlayerCharacter('ERDRICK');
+    this.openedChests = new Set();
+    this.openedDoors = new Set();
+    this.defeatedBosses = new Set();
+    this.rainbowBridgeBuilt = false;
+
+    this.warpTo('tantegel_throne', 5, 2, 'up', true);
+    this.ui?.updateStatusWindow();
+    this.ui?.queueMessages([
+      "King Lorik: \"Descendant of Erdrick! Listen to my words!\"",
+      "\"The Dragonlord hath stolen the Ball of Light and holds Princess Gwaelin in the eastern Swamp Cave.\"",
+      "\"Take the treasures in the three chests, use DOOR with a Magic Key, and descend the stairs to begin thy quest!\""
+    ]);
+  }
+
+  // ==========================================================================
+  // TILE QUERIES, COLLISION & WARPS
+  // ==========================================================================
+  getEffectiveTile(map, x, y) {
+    if (!map) return 'VOID';
+    if (y < 0 || y >= map.grid.length || x < 0 || x >= map.grid[0].length) {
+      return map.isOverworld ? 'WATER' : 'VOID';
+    }
+
+    // Dynamic Rainbow Bridge over strait to Charlock
+    if (map.id === 'overworld' && this.rainbowBridgeBuilt && x === 22 && y === 30) {
+      return 'BRIDGE';
+    }
+
+    const ch = map.grid[y][x];
+    const baseTile = CHAR_TO_TILE[ch] || 'VOID';
+
+    if (baseTile === 'LOCKED_DOOR' && this.openedDoors.has(`${map.id}:${x}:${y}`)) {
+      return 'STONE_FLOOR';
+    }
+    if (baseTile === 'CHEST') {
+      const chest = (map.chests || []).find(c => c.x === x && c.y === y);
+      if (chest && this.openedChests.has(chest.id)) {
+        return 'STONE_FLOOR';
+      }
+    }
+
+    return baseTile;
+  }
+
+  isTileBlocked(map, x, y) {
+    const tile = this.getEffectiveTile(map, x, y);
+    if (SOLID_TILES.has(tile)) return true;
+
+    // Check blocking NPCs
+    const npc = this.getNPCAt(map, x, y);
+    if (npc) return true;
+
+    return false;
+  }
+
+  getNPCAt(map, x, y) {
+    if (!map || !map.npcs) return null;
+    for (const npc of map.npcs) {
+      if (npc.x === x && npc.y === y) {
+        if (npc.isVisible && !npc.isVisible(this)) continue;
+        return npc;
+      }
+    }
+    return null;
+  }
+
+  getBossAt(map, x, y) {
+    if (!map || !map.bosses) return null;
+    for (const boss of map.bosses) {
+      if (boss.x === x && boss.y === y && !this.defeatedBosses.has(boss.id)) {
+        return boss;
+      }
+    }
+    return null;
+  }
+
+  warpTo(mapId, x, y, dir = 'down', silent = false) {
+    const target = MAPS[mapId];
+    if (!target) return;
+    this.currentMapId = mapId;
+    this.currentMap = target;
+    this.player.setGridPosition(x, y, dir);
+    if (!silent) {
+      this.sound?.playSFX('stairs');
+    }
+    this.updateLocationMusic();
+    this.ui?.updateStatusWindow();
+  }
+
+  updateLocationMusic() {
+    if (this.combat.inCombat || this.headless) return;
+    if (this.player.inventory.ballOfLight && this.currentMapId === 'tantegel_throne') {
+      this.music.playTrack('victory');
+      return;
+    }
+    if (this.currentMap && this.currentMap.music) {
+      this.music.playTrack(this.currentMap.music);
+    }
+  }
+
+  // ==========================================================================
+  // MOVEMENT & STEP PROCESSING
+  // ==========================================================================
+  tryMove(dir) {
+    if (this.player.isMoving) return false;
+    if (this.combat.inCombat) return false;
+    if (this.ui && (this.ui.mode !== 'none' || this.ui.isMessageActive())) return false;
+
+    const delta = DIR_DELTAS[dir];
+    if (!delta) return false;
+
+    this.player.dir = dir;
+    const nx = this.player.x + delta.dx;
+    const ny = this.player.y + delta.dy;
+
+    // Check if stepping into a fixed boss tile (triggers boss battle immediately)
+    const boss = this.getBossAt(this.currentMap, nx, ny);
+    if (boss) {
+      this.triggerBossEncounter(boss);
+      return false;
+    }
+
+    if (this.isTileBlocked(this.currentMap, nx, ny)) {
+      soundEngine.playSFX('bump');
+      return false;
+    }
+
+    this.player.startStep(nx, ny, dir);
+    return true;
+  }
+
+  onStepCompleted() {
+    const map = this.currentMap;
+    const x = this.player.x;
+    const y = this.player.y;
+    const tile = this.getEffectiveTile(map, x, y);
+
+    this.player.onStepTaken(map.isDark);
+
+    // 1. Check warps (Castle/Town/Cave/Shrine entrances, Stairs, Town borders)
+    const warp = (map.warps || []).find(w => w.x === x && w.y === y);
+    if (warp) {
+      this.warpTo(warp.targetMap, warp.targetX, warp.targetY, warp.dir || this.player.dir);
+      return;
+    }
+
+    // 2. Check fixed boss tile if stepped onto
+    const boss = this.getBossAt(map, x, y);
+    if (boss) {
+      this.triggerBossEncounter(boss);
+      return;
+    }
+
+    // 3. Check hazard tiles (Swamp / Barrier)
+    if (!this.player.hasTileImmunity() && !this.player.inventory.ballOfLight) {
+      if (tile === 'SWAMP') {
+        this.player.stats.hp -= 2;
+        soundEngine.playSFX('swamp_step');
+        this.renderer?.triggerFlash('#f83800', 180);
+        this.ui?.updateStatusWindow();
+        if (this.player.stats.hp <= 0) {
+          this.player.stats.hp = 0;
+          this.ui?.updateStatusWindow();
+          this.combat.handleDefeat();
+          return;
+        }
+      } else if (tile === 'BARRIER_FLOOR') {
+        this.player.stats.hp -= 15;
+        soundEngine.playSFX('swamp_step');
+        this.renderer?.triggerFlash('#f83800', 220);
+        this.ui?.updateStatusWindow();
+        if (this.player.stats.hp <= 0) {
+          this.player.stats.hp = 0;
+          this.ui?.updateStatusWindow();
+          this.combat.handleDefeat();
+          return;
+        }
+      }
+    }
+
+    this.ui?.updateStatusWindow();
+
+    // 4. Roll random encounter
+    const monsterType = this.combat.rollRandomEncounter(map, tile, x, y);
+    if (monsterType) {
+      this.combat.startEncounter(monsterType);
+    }
+  }
+
+  triggerBossEncounter(boss) {
+    if (this.ui) {
+      this.ui.queueMessages([boss.preMessage], () => {
+        this.combat.startEncounter(boss.monsterType, boss.id);
       });
+    } else {
+      this.combat.startEncounter(boss.monsterType, boss.id);
+    }
+  }
+
+  // ==========================================================================
+  // CONTEXTUAL SHORTCUT & 8 NES FIELD COMMANDS
+  // ==========================================================================
+  getContextualCommandId() {
+    const { dx, dy } = DIR_DELTAS[this.player.dir];
+    const tx = this.player.x + dx;
+    const ty = this.player.y + dy;
+    const map = this.currentMap;
+    const frontTile = this.getEffectiveTile(map, tx, ty);
+    const curTile = this.getEffectiveTile(map, this.player.x, this.player.y);
+
+    if (frontTile === 'LOCKED_DOOR') return 'door';
+    if (curTile === 'CHEST' || frontTile === 'CHEST') return 'take';
+    if (this.getNPCAt(map, tx, ty) || (frontTile === 'COUNTER' && this.getNPCAt(map, tx + dx, ty + dy))) {
+      return 'talk';
+    }
+    if ((map.warps || []).some(w => w.x === this.player.x && w.y === this.player.y)) return 'stairs';
+    return 'talk';
+  }
+
+  executeFieldCommand(cmdId) {
+    switch (cmdId) {
+      case 'talk':   return this.cmdTalk();
+      case 'spell':  return this.cmdSpell();
+      case 'status': return this.ui.openStatusDetail();
+      case 'item':   return this.cmdItem();
+      case 'stairs': return this.cmdStairs();
+      case 'door':   return this.cmdDoor();
+      case 'search': return this.cmdSearch();
+      case 'take':   return this.cmdTake();
+    }
+  }
+
+  cmdTalk() {
+    const { dx, dy } = DIR_DELTAS[this.player.dir];
+    const tx = this.player.x + dx;
+    const ty = this.player.y + dy;
+    const map = this.currentMap;
+
+    let npc = this.getNPCAt(map, tx, ty);
+    if (!npc && this.getEffectiveTile(map, tx, ty) === 'COUNTER') {
+      npc = this.getNPCAt(map, tx + dx, ty + dy);
+    }
+
+    if (!npc) {
+      this.ui.queueMessages(["There is no one there."]);
+      return;
+    }
+
+    // Dragonlord iconic offer
+    if (npc.isDragonlord) {
+      this.music.playTrack('dragonlord');
+      this.ui.queueMessages([
+        "Dragonlord: \"Welcome, Erdrick's descendant. I have been waiting for thee.\"",
+        "\"I offer thee a deal. Side with me, and I will give thee half of the world!\"",
+        "\"Dost thou accept my offer?\""
+      ], () => {
+        this.ui.openChoiceMenu(
+          "ACCEPT OFFER?",
+          "YES",
+          "NO",
+          () => {
+            this.sound.playSFX('curse');
+            this.renderer?.triggerFlash('#f83800', 400);
+            this.ui.queueMessages([
+              "Dragonlord: \"Foolish mortal! Those who kneel before darkness surrender their soul!\"",
+              "A crushing blackness engulfs Erdrick..."
+            ], () => {
+              this.player.stats.hp = this.player.stats.maxHp;
+              this.player.stats.mp = this.player.stats.maxMp;
+              this.warpTo('tantegel_throne', 5, 2, 'up');
+              this.ui.queueMessages([
+                "King Lorik: \"What a dreadful nightmare! Take heart, Erdrick, and never yield to darkness!\""
+              ]);
+            });
+          },
+          () => {
+            this.ui.queueMessages([
+              "Dragonlord: \"So be it! Then taste the wrath of the Dragonlord!\""
+            ], () => {
+              this.combat.startEncounter('dragonlord_1', 'dragonlord_final');
+            });
+          }
+        );
+      });
+      return;
+    }
+
+    // Shopkeeper
+    if (npc.shop) {
+      this.ui.queueMessages([`${npc.name}: "Welcome! What wouldst thou like?"`], () => {
+        this.ui.openShopMenu(npc.shop);
+      });
+      return;
+    }
+
+    // Innkeeper
+    if (npc.innPrice) {
+      this.ui.queueMessages([
+        `${npc.name}: "Welcome to the Travelers' Inn! Room and board is ${npc.innPrice} Gold."`,
+        `"Dost thou wish to rest for the night?"`
+      ], () => {
+        this.ui.openChoiceMenu(
+          `STAY (${npc.innPrice}G)?`,
+          "YES",
+          "NO",
+          () => {
+            if (this.player.stats.gold < npc.innPrice) {
+              soundEngine.playSFX('bump');
+              this.ui.queueMessages(["\"Thou dost not have enough Gold!\""]);
+              return;
+            }
+            this.player.stats.gold -= npc.innPrice;
+            this.player.stats.hp = this.player.stats.maxHp;
+            this.player.stats.mp = this.player.stats.maxMp;
+            this.ui.updateStatusWindow();
+            soundEngine.playSFX('inn_sleep');
+            this.renderer?.triggerFlash('#000000', 450);
+            this.ui.queueMessages(["Good morning! Thou hast had a restful night. Thy HP and MP are restored!"]);
+          },
+          () => {
+            this.ui.queueMessages(["\"Please come again!\""]);
+          }
+        );
+      });
+      return;
+    }
+
+    // Standard NPC dialogue
+    const lines = typeof npc.dialogue === 'function' ? npc.dialogue(this) : (npc.dialogue || []);
+    this.ui.queueMessages(lines, () => {
+      npc.onTalkEnd?.(this);
+      this.ui.updateStatusWindow();
+    });
+  }
+
+  cmdSpell() {
+    const p = this.player;
+    const fieldSpells = ['HEAL', 'RADIANT', 'OUTSIDE', 'RETURN', 'REPEL', 'HEALMORE'];
+    const learned = p.spells.filter(s => fieldSpells.includes(s));
+
+    const items = learned.map(spell => {
+      const costs = { HEAL: 4, RADIANT: 3, OUTSIDE: 6, RETURN: 8, REPEL: 2, HEALMORE: 10 };
+      const cost = costs[spell] || 0;
+      return {
+        label: spell,
+        rightText: `${cost}`,
+        disabled: p.stats.mp < cost,
+        onSelect: () => {
+          this.ui.closeMenusToField();
+          this.castFieldSpell(spell, cost);
+        },
+      };
     });
 
-    // 10. The Legendary Green Dragon in Quagmire Cave!
-    this.greenDragonMesh = MonsterFactory.createGreenDragon();
-    this.greenDragonMesh.position.set(65, 1.2, 51);
-    this.greenDragonMesh.rotation.y = -Math.PI / 2.5;
-    this.scene.add(this.greenDragonMesh);
-    this.greenDragonDefeated = false;
-
-    // 11. The Dragonlord atop Charlock Island!
-    this.dragonlordMesh = MonsterFactory.createDragonlord();
-    this.dragonlordMesh.position.set(-75, 7.2, -69);
-    this.scene.add(this.dragonlordMesh);
-    this.dragonlordDefeated = false;
+    this.ui.openSubMenu('SPELL', items, 'command');
   }
 
-  initUI() {
-    this.ui = new GameUI(this);
-    window.gameInstance = this; // for HTML onclick helpers
+  castFieldSpell(spell, cost) {
+    const p = this.player;
+    if (p.stats.mp < cost) return;
+    p.stats.mp -= cost;
+    soundEngine.playSFX('spell_cast');
+    this.renderer?.triggerFlash('#fcfcfc', 240);
+    this.ui?.updateStatusWindow();
 
-    // Play starting Tantegel Castle theme
-    musicManager.playTrack('castle');
-    this.ui.updateHUD();
-
-    // Welcome lore introduction toast
-    setTimeout(() => {
-      this.ui.showToast("Welcome to Alefgard, descendant of Erdrick! Speak with King Lorik in Tantegel Castle.");
-    }, 1200);
+    if (spell === 'HEAL') {
+      const heal = 15 + Math.floor(Math.random() * 8);
+      p.stats.hp = Math.min(p.stats.maxHp, p.stats.hp + heal);
+      soundEngine.playSFX('heal');
+      this.ui?.updateStatusWindow();
+      this.ui?.queueMessages([`${p.stats.name} chants HEAL! Recovered ${heal} HP!`]);
+    } else if (spell === 'HEALMORE') {
+      const heal = 85 + Math.floor(Math.random() * 16);
+      p.stats.hp = Math.min(p.stats.maxHp, p.stats.hp + heal);
+      soundEngine.playSFX('heal');
+      this.ui?.updateStatusWindow();
+      this.ui?.queueMessages([`${p.stats.name} chants HEALMORE! Recovered ${heal} HP!`]);
+    } else if (spell === 'RADIANT') {
+      if (!this.currentMap.isDark) {
+        this.ui?.queueMessages(["A blinding glow illuminates the sky, yet fades away."]);
+      } else {
+        p.radiantSteps = 180;
+        this.ui?.queueMessages(["A brilliant light surrounds Erdrick and drives back the cavern gloom!"]);
+      }
+    } else if (spell === 'OUTSIDE') {
+      if (this.currentMap.allowOutside && this.currentMap.warps && this.currentMap.warps.length > 0) {
+        const w = this.currentMap.warps[0];
+        this.warpTo(w.targetMap, w.targetX, w.targetY, 'down');
+      } else {
+        this.ui?.queueMessages(["Thou cannot cast OUTSIDE here!"]);
+      }
+    } else if (spell === 'RETURN') {
+      if (this.currentMap.isOverworld) {
+        this.warpTo('overworld', 28, 28, 'down');
+        this.ui?.queueMessages(["Erdrick is borne upon mystic winds back to Tantegel Castle!"]);
+      } else {
+        this.ui?.queueMessages(["RETURN may only be cast outdoors!"]);
+      }
+    } else if (spell === 'REPEL') {
+      p.repelSteps = 128;
+      this.ui?.queueMessages(["An aura of protection repels weak monsters from thy path!"]);
+    }
   }
 
-  initInput() {
+  cmdItem() {
+    const p = this.player;
+    const inv = p.inventory;
+    const items = [];
+
+    if (inv.herbs > 0) {
+      items.push({
+        label: 'HERB',
+        rightText: `x${inv.herbs}`,
+        onSelect: () => {
+          this.ui.closeMenusToField();
+          inv.herbs--;
+          const heal = 23 + Math.floor(Math.random() * 8);
+          p.stats.hp = Math.min(p.stats.maxHp, p.stats.hp + heal);
+          soundEngine.playSFX('heal');
+          this.ui.updateStatusWindow();
+          this.ui.queueMessages([`${p.stats.name} used a Medicinal Herb! Restored ${heal} HP!`]);
+        },
+      });
+    }
+    if (inv.torches > 0) {
+      items.push({
+        label: 'TORCH',
+        rightText: `x${inv.torches}`,
+        onSelect: () => {
+          this.ui.closeMenusToField();
+          if (!this.currentMap.isDark) {
+            this.ui.queueMessages(["A Torch can only be lit inside dark dungeons!"]);
+            return;
+          }
+          inv.torches--;
+          p.torchSteps = 100;
+          soundEngine.playSFX('spell_cast');
+          this.ui.queueMessages(["Erdrick lights a blazing Torch!"]);
+        },
+      });
+    }
+    if (inv.fairyWater > 0) {
+      items.push({
+        label: 'FAIRY WATER',
+        rightText: `x${inv.fairyWater}`,
+        onSelect: () => {
+          this.ui.closeMenusToField();
+          inv.fairyWater--;
+          p.repelSteps = 128;
+          soundEngine.playSFX('spell_cast');
+          this.ui.queueMessages(["Erdrick sprinkled Fairy Water! Weak foes stay afar."]);
+        },
+      });
+    }
+    if (inv.wings > 0) {
+      items.push({
+        label: 'WYVERN WING',
+        rightText: `x${inv.wings}`,
+        onSelect: () => {
+          this.ui.closeMenusToField();
+          if (!this.currentMap.isOverworld) {
+            this.ui.queueMessages(["A Wyvern Wing cannot be used indoors!"]);
+            return;
+          }
+          inv.wings--;
+          this.warpTo('overworld', 28, 28, 'down');
+          this.ui.queueMessages(["The Wyvern Wing lifts Erdrick swiftly back to Tantegel Castle!"]);
+        },
+      });
+    }
+    if (inv.fairyFlute) {
+      items.push({
+        label: 'FAIRY FLUTE',
+        onSelect: () => {
+          this.ui.closeMenusToField();
+          soundEngine.playSFX('flute');
+          this.ui.queueMessages(["Erdrick plays a gentle melody upon the Fairy Flute."]);
+        },
+      });
+    }
+    if (inv.gwaelinLove) {
+      items.push({
+        label: "GWAELIN'S LOVE",
+        onSelect: () => {
+          this.ui.closeMenusToField();
+          const nextReq = p.stats.level >= 30 ? 0 : Math.max(0, p.stats.nextExp - p.stats.exp);
+          const lines = [`"Thou needst ${nextReq} more Experience Points to attain the next Level."`];
+          if (this.currentMap.isOverworld) {
+            const dx = 28 - p.x;
+            const dy = 28 - p.y;
+            const ns = dy === 0 ? '' : (dy < 0 ? `${Math.abs(dy)} North` : `${dy} South`);
+            const ew = dx === 0 ? '' : (dx < 0 ? `${Math.abs(dx)} West` : `${dx} East`);
+            const distDesc = [ns, ew].filter(Boolean).join(', ') || '0 steps';
+            lines.push(`"From where thou standest, Tantegel Castle lies ${distDesc}."`);
+          }
+          this.ui.queueMessages(lines);
+        },
+      });
+    }
+    if (inv.rainbowDrop) {
+      items.push({
+        label: 'RAINBOW DROP',
+        onSelect: () => {
+          this.ui.closeMenusToField();
+          if (this.currentMapId === 'overworld' && !this.rainbowBridgeBuilt && Math.hypot(p.x - 23, p.y - 30) <= 1.5) {
+            this.rainbowBridgeBuilt = true;
+            soundEngine.playSFX('level_up');
+            this.renderer?.triggerFlash('#fcfcfc', 750, true);
+            this.ui.queueMessages([
+              "Erdrick holds the Rainbow Drop high!",
+              "A dazzling Rainbow Bridge spans the dark sea to Charlock Island!"
+            ]);
+          } else {
+            this.ui.queueMessages(["Erdrick held up the Rainbow Drop, yet nothing happened here."]);
+          }
+        },
+      });
+    }
+
+    this.ui.openSubMenu('ITEM', items, 'command');
+  }
+
+  cmdStairs() {
+    this.ui?.closeMenusToField();
+    const warp = (this.currentMap.warps || []).find(w => w.x === this.player.x && w.y === this.player.y);
+    if (warp) {
+      this.warpTo(warp.targetMap, warp.targetX, warp.targetY, warp.dir || this.player.dir);
+      return true;
+    } else {
+      this.ui?.queueMessages(["There are no stairs here."]);
+      return false;
+    }
+  }
+
+  cmdDoor() {
+    this.ui?.closeMenusToField();
+    const { dx, dy } = DIR_DELTAS[this.player.dir];
+    const tx = this.player.x + dx;
+    const ty = this.player.y + dy;
+    const tile = this.getEffectiveTile(this.currentMap, tx, ty);
+
+    if (tile !== 'LOCKED_DOOR') {
+      this.ui?.queueMessages(["There is no door here."]);
+      return false;
+    }
+
+    if (this.player.inventory.magicKeys <= 0) {
+      this.sound?.playSFX('bump');
+      this.ui?.queueMessages(["Thou hast no Magic Key!"]);
+      return false;
+    }
+
+    this.player.inventory.magicKeys--;
+    this.openedDoors.add(`${this.currentMap.id}:${tx}:${ty}`);
+    this.sound?.playSFX('door_open');
+    this.ui?.updateStatusWindow();
+    this.ui?.queueMessages(["Erdrick unlocked the door!"]);
+    return true;
+  }
+
+  cmdSearch() {
+    this.ui?.closeMenusToField();
+    const map = this.currentMap;
+    const x = this.player.x;
+    const y = this.player.y;
+
+    const spot = (map.searchSpots || []).find(s => s.x === x && s.y === y);
+    if (spot) {
+      if (spot.requiresBoss && !this.defeatedBosses.has(spot.requiresBoss)) {
+        this.ui?.queueMessages(["A menacing presence prevents searching here!"]);
+        return false;
+      }
+      if (!this.player.inventory[spot.flag]) {
+        this.player.inventory[spot.flag] = true;
+        if (spot.flag === 'erdrickArmor') {
+          this.player.stats.armor = "Erdrick's Armor";
+        }
+        this.sound?.playSFX('chest_open');
+        this.ui?.updateStatusWindow();
+        this.ui?.queueMessages([spot.foundMsg]);
+        return true;
+      }
+    }
+
+    const chest = (map.chests || []).find(c => c.x === x && c.y === y && !this.openedChests.has(c.id));
+    if (chest) {
+      this.ui?.queueMessages(["There is a treasure chest at thy feet! Use TAKE to open it."]);
+      return false;
+    }
+
+    this.ui?.queueMessages(["Erdrick searches the ground all about... But nothing is found."]);
+    return false;
+  }
+
+  cmdTake() {
+    this.ui?.closeMenusToField();
+    const map = this.currentMap;
+    const { dx, dy } = DIR_DELTAS[this.player.dir];
+    const candidates = [
+      { x: this.player.x, y: this.player.y },
+      { x: this.player.x + dx, y: this.player.y + dy },
+    ];
+
+    for (const pos of candidates) {
+      const chest = (map.chests || []).find(c => c.x === pos.x && c.y === pos.y && !this.openedChests.has(c.id));
+      if (chest) {
+        this.openChest(chest);
+        return true;
+      }
+    }
+
+    this.ui?.queueMessages(["There is nothing to take here."]);
+    return false;
+  }
+
+  openChest(chest) {
+    this.openedChests.add(chest.id);
+    soundEngine.playSFX('chest_open');
+
+    const p = this.player;
+    if (chest.item === 'gold') p.stats.gold += chest.amount || 0;
+    else if (chest.item === 'herb') p.inventory.herbs = Math.min(6, p.inventory.herbs + (chest.amount || 1));
+    else if (chest.item === 'torch') p.inventory.torches += chest.amount || 1;
+    else if (chest.item === 'magic_key') p.inventory.magicKeys = Math.min(6, p.inventory.magicKeys + (chest.amount || 1));
+    else if (chest.item === 'sunstone') p.inventory.sunstone = true;
+    else if (chest.item === 'fighterRing') p.inventory.fighterRing = true;
+    else if (chest.item === 'silverHarp') p.inventory.silverHarp = true;
+    else if (chest.item === 'erdrickSword') p.stats.weapon = "Erdrick's Sword";
+
+    this.ui?.updateStatusWindow();
+    this.ui?.queueMessages([`Erdrick opens the chest and finds ${chest.label}!`]);
+  }
+
+  // ==========================================================================
+  // INPUT & GAME LOOP
+  // ==========================================================================
+  bindGlobalInput() {
     window.addEventListener('keydown', (e) => {
+      const navKeys = ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space', 'Enter', 'Escape', 'Backspace'];
+      if (navKeys.includes(e.code)) {
+        e.preventDefault();
+      }
+
       soundEngine.init();
       soundEngine.resume();
 
-      switch (e.code) {
-        case 'KeyW': case 'ArrowUp': this.input.vertical = -1; break;
-        case 'KeyS': case 'ArrowDown': this.input.vertical = 1; break;
-        case 'KeyA': case 'ArrowLeft': this.input.horizontal = -1; break;
-        case 'KeyD': case 'ArrowRight': this.input.horizontal = 1; break;
-        case 'Space':
-          this.input.jump = true;
-          soundEngine.playSFX('jump');
-          break;
-        case 'ShiftLeft': case 'ShiftRight':
-          this.input.sprint = true;
-          break;
-        case 'KeyE':
-          this.triggerActiveInteraction();
-          break;
-        case 'KeyF':
-          // Toggle Torch
-          this.player.setTorchEquipped(!this.player.hasTorchEquipped);
-          soundEngine.playSFX('menu_select');
-          this.ui.showToast(this.player.hasTorchEquipped ? "Equipped blazing Torch!" : "Extinguished Torch.");
-          break;
-        case 'KeyR':
-          // Draw or Sheathe Erdrick's Sword
-          this.player.setWeaponDrawn(!this.player.isWeaponDrawn);
-          soundEngine.playSFX('sword_attack');
-          this.ui.showToast(this.player.isWeaponDrawn ? "Unsheathed Erdrick's Sword!" : "Sheathed Sword in Scabbard.");
-          break;
-        case 'Escape':
-          if (this.combat.inCombat) {
-            this.ui.closeCombatSubmenus();
-          } else {
-            this.ui.closeAllModals();
-          }
-          break;
+      if (e.code === 'KeyM') {
+        const muted = soundEngine.toggleMute();
+        const btn = document.getElementById('btn-audio-toggle');
+        if (btn) btn.textContent = muted ? 'AUDIO: OFF' : 'AUDIO: ON';
+        return;
       }
+
+      if (this.ui && this.ui.mode === 'none' && !this.ui.isMessageActive() && !this.combat.inCombat) {
+        let dir = null;
+        if (e.code === 'KeyW' || e.code === 'ArrowUp') dir = 'up';
+        else if (e.code === 'KeyS' || e.code === 'ArrowDown') dir = 'down';
+        else if (e.code === 'KeyA' || e.code === 'ArrowLeft') dir = 'left';
+        else if (e.code === 'KeyD' || e.code === 'ArrowRight') dir = 'right';
+
+        if (dir) {
+          this.heldDirs.add(dir);
+          // Respond immediately to single-tile key taps even if released before next frame
+          if (!this.player.isMoving) {
+            this.tryMove(dir);
+          } else {
+            this.queuedTapDir = dir;
+          }
+        }
+      }
+
+      this.ui?.handleKeyDown(e.code);
     });
 
     window.addEventListener('keyup', (e) => {
-      switch (e.code) {
-        case 'KeyW': case 'ArrowUp': if (this.input.vertical === -1) this.input.vertical = 0; break;
-        case 'KeyS': case 'ArrowDown': if (this.input.vertical === 1) this.input.vertical = 0; break;
-        case 'KeyA': case 'ArrowLeft': if (this.input.horizontal === -1) this.input.horizontal = 0; break;
-        case 'KeyD': case 'ArrowRight': if (this.input.horizontal === 1) this.input.horizontal = 0; break;
-        case 'Space': this.input.jump = false; break;
-        case 'ShiftLeft': case 'ShiftRight': this.input.sprint = false; break;
-      }
+      if (e.code === 'KeyW' || e.code === 'ArrowUp') this.heldDirs.delete('up');
+      if (e.code === 'KeyS' || e.code === 'ArrowDown') this.heldDirs.delete('down');
+      if (e.code === 'KeyA' || e.code === 'ArrowLeft') this.heldDirs.delete('left');
+      if (e.code === 'KeyD' || e.code === 'ArrowRight') this.heldDirs.delete('right');
     });
 
-    // Mouse Orbit Controls
-    window.addEventListener('mousedown', (e) => {
-      if (e.target.closest('button, input, select, textarea, .retro-panel, .modal-backdrop, .modal-card, .shop-row, .lotto-btn, .flute-btn, #combat-overlay')) return;
-      this.isDraggingMouse = true;
-      this.previousMousePosition = { x: e.clientX, y: e.clientY };
-    });
-
-    window.addEventListener('mousemove', (e) => {
-      if (!this.isDraggingMouse) return;
-      const deltaX = e.clientX - this.previousMousePosition.x;
-      const deltaY = e.clientY - this.previousMousePosition.y;
-
-      this.cameraYaw -= deltaX * 0.005;
-      this.cameraPitch = Math.max(0.1, Math.min(1.2, this.cameraPitch + deltaY * 0.005));
-
-      this.previousMousePosition = { x: e.clientX, y: e.clientY };
-    });
-
-    window.addEventListener('mouseup', () => {
-      this.isDraggingMouse = false;
-    });
-
-    window.addEventListener('wheel', (e) => {
-      this.cameraDistance = Math.max(4.5, Math.min(18.0, this.cameraDistance + e.deltaY * 0.01));
+    window.addEventListener('blur', () => {
+      this.heldDirs.clear();
     });
   }
 
   startLoop() {
-    const loop = () => {
-      requestAnimationFrame(loop);
-      if (this.timer && typeof this.timer.update === 'function') {
-        this.timer.update();
-      }
-      const delta = (this.timer && typeof this.timer.getDelta === 'function') 
-        ? Math.min(0.1, this.timer.getDelta()) 
-        : 0.016;
-      const time = (this.timer && typeof this.timer.getElapsed === 'function') 
-        ? this.timer.getElapsed() 
-        : performance.now() * 0.001;
+    this.lastTime = performance.now();
+    const tick = (now) => {
+      requestAnimationFrame(tick);
+      const dt = Math.min(0.05, Math.max(0.001, (now - this.lastTime) / 1000));
+      this.lastTime = now;
 
-      try {
-        this.update(delta, time);
-      } catch (err) {
-        console.error("Game update error:", err);
-      }
-      try {
-        this.render();
-      } catch (err) {
-        console.error("Game render error:", err);
-      }
+      this.update(dt);
+      this.render();
     };
-    loop();
+    requestAnimationFrame(tick);
   }
 
-  update(delta, time) {
+  update(dt) {
+    this.renderer?.update(dt);
+
     if (this.combat.inCombat) {
-      // In combat: keep sky, grass, water, particles alive in background, and update HUD!
-      this.sky.update(delta, this.player.position);
-      this.grass.update(time, this.player.position, this.sky.sunDir);
-      this.water.update(time, this.sky.sunDir);
-      this.particles.update(delta, time, this.player.position, this.sky.timeOfDay < 0.22 || this.sky.timeOfDay > 0.78);
-      this.ui.updateHUD();
+      // Keep monster canvas blinking/updated on hit
+      if (this.ui?.currentCombatMonster) {
+        this.renderer?.renderCombatMonster(this.ui.currentCombatMonster.type);
+      }
       return;
     }
 
-    // 1. Update Player
-    this.player.update(delta, this.input, this.camera);
-
-    // 2. Camera Follow & Orbit
-    this.updateCamera();
-
-    // 3. Update Sky & Day/Night
-    this.sky.update(delta, this.player.position);
-
-    // 4. Update Grass Wind
-    this.grass.update(time, this.player.position, this.sky.sunDir);
-
-    // 5. Update Water
-    this.water.update(time, this.sky.sunDir);
-
-    // 6. Update Particles
-    const isNight = this.sky.timeOfDay < 0.22 || this.sky.timeOfDay > 0.78;
-    this.particles.update(delta, time, this.player.position, isNight);
-
-    // 7. Update Charlock & Rainbow Bridge
-    this.charlock.update(time);
-
-    // 8. Update Roaming Monsters
-    this.updateMonsters(delta, time);
-
-    // 9. Check Poison Swamp Hazard
-    this.checkSwampHazard(time);
-
-    // 10. Check Interactivity & Proximity
-    this.checkInteractions();
-
-    // 11. Zone detection & background music
-    this.checkZoneAudio();
-
-    // 12. Update UI
-    this.ui.updateHUD();
-  }
-
-  updateCamera() {
-    const p = this.player.position;
-    const targetY = p.y + 1.6;
-
-    // Calculate orbital position
-    const offsetX = Math.sin(this.cameraYaw) * Math.cos(this.cameraPitch) * this.cameraDistance;
-    const offsetY = Math.sin(this.cameraPitch) * this.cameraDistance;
-    const offsetZ = Math.cos(this.cameraYaw) * Math.cos(this.cameraPitch) * this.cameraDistance;
-
-    const desiredCamPos = new THREE.Vector3(p.x + offsetX, targetY + offsetY, p.z + offsetZ);
-
-    // Smooth camera interpolation (instant on first frame)
-    if (!this.cameraInitialized) {
-      this.camera.position.copy(desiredCamPos);
-      this.cameraInitialized = true;
-    } else {
-      this.camera.position.lerp(desiredCamPos, 0.14);
-    }
-    this.camera.lookAt(p.x, targetY, p.z);
-  }
-
-  updateMonsters(delta, time) {
-    const pPos = this.player.position;
-
-    // Decrement combat cooldown grace period
-    if (this.combatCooldown > 0) {
-      this.combatCooldown -= delta;
+    if (this.ui && (this.ui.mode !== 'none' || this.ui.isMessageActive())) {
+      this.heldDirs.clear();
+      this.queuedTapDir = null;
+      return;
     }
 
-    // 1. Roaming Field Monsters
-    this.roamingMonsters.forEach(m => {
-      // Handle respawn if defeated
-      if (m.respawnTimer > 0) {
-        m.respawnTimer -= delta;
-        if (m.respawnTimer <= 0) {
-          m.mesh.visible = true;
-          m.mesh.position.set(m.originX, this.terrain.getHeight(m.originX, m.originZ), m.originZ);
-        } else {
-          m.mesh.visible = false;
-          return;
-        }
+    if (this.player.isMoving) {
+      const done = this.player.updateStep(dt);
+      if (done) {
+        this.onStepCompleted();
       }
-
-      m.patrolTimer += delta;
-      // Gentle patrol hop / wander
-      const wanderAngle = m.patrolTimer * 0.4;
-      const targetX = m.originX + Math.cos(wanderAngle) * 3.5;
-      const targetZ = m.originZ + Math.sin(wanderAngle) * 3.5;
-
-      m.mesh.position.x = THREE.MathUtils.lerp(m.mesh.position.x, targetX, delta * 1.2);
-      m.mesh.position.z = THREE.MathUtils.lerp(m.mesh.position.z, targetZ, delta * 1.2);
-      m.mesh.position.y = this.terrain.getHeight(m.mesh.position.x, m.mesh.position.z) + Math.abs(Math.sin(time * 3.0)) * 0.35;
-
-      // Drakee wing flapping
-      if (m.data.wingL) {
-        m.data.wingL.rotation.z = Math.sin(time * 12) * 0.4;
-        m.data.wingR.rotation.z = -Math.sin(time * 12) * 0.4;
-      }
-
-      // Check encounter collision with player
-      const dist = Math.hypot(pPos.x - m.mesh.position.x, pPos.z - m.mesh.position.z);
-      if (dist < 1.8 && this.combatCooldown <= 0 && !this.combat.inCombat && !this.ui.isDialogueActive()) {
-        this.combat.startEncounter(m.data, false, m);
-      }
-    });
-
-    // 2. Boss: Green Dragon in Cave
-    if (!this.greenDragonDefeated && this.greenDragonMesh) {
-      const distDragon = pPos.distanceTo(this.greenDragonMesh.position);
-      if (distDragon < 4.5 && this.combatCooldown <= 0 && !this.combat.inCombat && !this.ui.isDialogueActive()) {
-        this.combat.startEncounter(this.greenDragonMesh.userData, true);
-      }
+    } else if (this.queuedTapDir) {
+      const d = this.queuedTapDir;
+      this.queuedTapDir = null;
+      this.tryMove(d);
+    } else if (this.heldDirs.size > 0) {
+      // Move in most recently held direction
+      const dirs = [...this.heldDirs];
+      this.tryMove(dirs[dirs.length - 1]);
     }
-
-    // 3. Final Boss: Dragonlord
-    if (!this.dragonlordDefeated && this.dragonlordMesh) {
-      const distDL = pPos.distanceTo(this.dragonlordMesh.position);
-      if (distDL < 6.5 && this.combatCooldown <= 0 && !this.combat.inCombat && !this.ui.isDialogueActive()) {
-        this.combat.startEncounter(this.dragonlordMesh.userData, true);
-      }
-    }
-  }
-
-  checkSwampHazard(time) {
-    const p = this.player.position;
-    const distToSwamp = Math.hypot(p.x - 45, p.z - 35);
-
-    if (distToSwamp < 16.0) {
-      // In the deadly poison swamp!
-      if (time - this.lastSwampDamageTime > 1.4) {
-        this.lastSwampDamageTime = time;
-        soundEngine.playSFX('swamp_damage');
-        this.player.stats.hp = Math.max(1, this.player.stats.hp - 2);
-        this.ui.triggerPlayerDamageFlash();
-        this.ui.showToast("The noxious swamp burns thy flesh! -2 HP!");
-      }
-    }
-  }
-
-  checkZoneAudio() {
-    const p = this.player.position;
-    let newZone = 'overworld';
-
-    const dCastle = Math.hypot(p.x - 0, p.z - (-28));
-    const dTown = Math.hypot(p.x - 45, p.z - (-10));
-    const dCave = Math.hypot(p.x - 68, p.z - 48);
-
-    if (dCastle < 17) newZone = 'castle';
-    else if (dTown < 16) newZone = 'town';
-    else if (dCave < 18 || p.x > 56) newZone = 'cave';
-    else newZone = 'overworld';
-
-    if (newZone !== this.currentZone) {
-      this.currentZone = newZone;
-      this.updateLocationMusic();
-    }
-  }
-
-  updateLocationMusic() {
-    if (this.combat.inCombat) return;
-    musicManager.playTrack(this.currentZone);
-  }
-
-  checkInteractions() {
-    const p = this.player.position;
-    let nearest = null;
-    let minDist = 3.2;
-
-    // Check all interactive objects: Castle chests, NPCs, shops, cave tablet, shrines, campfires
-    const candidateList = [
-      ...this.castle.interactiveObjects,
-      ...this.town.interactiveObjects,
-      ...this.cave.interactiveObjects,
-      ...this.shrines.interactiveObjects,
-      ...this.charlock.interactiveObjects,
-      ...this.npcs.npcs
-    ];
-
-    candidateList.forEach(obj => {
-      const d = p.distanceTo(obj.position);
-      if (d < minDist) {
-        minDist = d;
-        nearest = obj;
-      }
-    });
-
-    this.activeInteraction = nearest;
-    if (nearest) {
-      let promptText = 'Interact';
-      if (nearest.type === 'chest') promptText = nearest.isOpen ? 'Opened Chest' : `Open Chest (${nearest.itemName})`;
-      else if (nearest.type === 'shop_weapon') promptText = 'Talk to Weaponsmith';
-      else if (nearest.type === 'shop_item') promptText = 'Talk to Alchemist';
-      else if (nearest.type === 'inn') promptText = 'Rest at the Inn';
-      else if (nearest.type === 'minigame_archery') promptText = 'Play Slime Archery';
-      else if (nearest.type === 'minigame_lotto') promptText = 'Play Lucky Lotto';
-      else if (nearest.type === 'campfire') promptText = 'Rest / Cook at Campfire';
-      else if (nearest.type === 'shrine_rain') promptText = nearest.isTaken ? 'Rain Shrine Altar' : 'Claim Staff of Rain';
-      else if (nearest.type === 'dig_flute') promptText = nearest.isDug ? 'Dug Soft Earth' : 'Dig in Soft Earth';
-      else if (nearest.type === 'tablet') promptText = "Read Erdrick's Tablet";
-      else if (nearest.type === 'charlock_cape') promptText = this.charlock.bridgeBuilt ? 'Rainbow Bridge' : 'Raise Rainbow Drop';
-      else if (nearest.name) promptText = `Speak to ${nearest.name}`;
-
-      this.ui.showInteractionPrompt(promptText);
-    } else {
-      this.ui.hideInteractionPrompt();
-    }
-  }
-
-  triggerActiveInteraction() {
-    if (!this.activeInteraction) return;
-    const item = this.activeInteraction;
-
-    // 1. Treasure Chest
-    if (item.type === 'chest') {
-      if (!item.isOpen) {
-        item.isOpen = true;
-        if (item.lidGroup) item.lidGroup.rotation.x = -Math.PI / 2.2;
-        soundEngine.playSFX('chest_open');
-
-        if (item.itemId === 'gold_120') {
-          this.player.stats.gold += 120;
-          this.ui.showToast("Thou hast discovered 120 Gold Coins!");
-        } else if (item.itemId === 'torch') {
-          this.player.inventory.torches += 2;
-          this.player.setTorchEquipped(true);
-          this.ui.showToast("Discovered 2 Torches! Equipped torch to light dark caves.");
-        } else if (item.itemId === 'magic_key') {
-          this.player.inventory.magicKeys += 1;
-          this.player.inventory.sunstone = true; // Also unlocks Sunstone in Tantegel!
-          this.ui.showToast("Found a Magic Key and the radiant Sunstone of Tantegel!");
-        } else if (item.itemId === 'erdrick_ring') {
-          this.player.inventory.erdrickRing = true;
-          this.player.stats.defense += 6;
-          this.ui.showToast("Discovered Erdrick's Ring! Defense increased by +6!");
-        }
-        this.ui.updateHUD();
-      } else {
-        this.ui.showToast("The chest is empty.");
-      }
-    }
-
-    // 2. NPC Dialogue
-    else if (item.getDialogue) {
-      soundEngine.playSFX('menu_select');
-      const lines = item.getDialogue(this.player);
-
-      this.ui.showDialogue(item.name, lines, () => {
-        // Dialogue end triggers
-        if (item.id === 'king_lorik' && this.player.isCarryingPrincess) {
-          // Delivered Princess to King Lorik!
-          this.player.setCarryingPrincess(false);
-          this.player.inventory.gwaelinLove = true;
-          this.player.stats.gold += 300;
-          this.player.addExp(200);
-          soundEngine.playSFX('level_up');
-          this.ui.showToast("King Lorik bestowed royal favor and Gwaelin's Love upon thee!");
-          this.ui.updateHUD();
-        } else if (item.id === 'princess_gwaelin' && !this.npcs.princessGwaelin.isRescued) {
-          // Rescued Princess from cave!
-          this.npcs.princessGwaelin.isRescued = true;
-          this.npcs.princessGwaelin.group.visible = false;
-          this.player.setCarryingPrincess(true);
-          soundEngine.playSFX('chest_open');
-          this.ui.showToast("Thou art now carrying Princess Gwaelin in thy arms! Bring her home to King Lorik!");
-        }
-      });
-    }
-
-    // 3. Shops & Inn
-    else if (item.type === 'shop_weapon') {
-      soundEngine.playSFX('menu_select');
-      this.ui.showShopModal('weapon');
-    } else if (item.type === 'shop_item') {
-      soundEngine.playSFX('menu_select');
-      this.ui.showShopModal('item');
-    } else if (item.type === 'inn') {
-      soundEngine.playSFX('menu_select');
-      this.ui.showInnModal();
-    }
-
-    // 4. Mini-Games
-    else if (item.type === 'minigame_archery') {
-      this.archeryGame.start();
-    } else if (item.type === 'minigame_lotto') {
-      this.ui.showLottoModal();
-    } else if (item.type === 'campfire') {
-      this.ui.showCampfireModal();
-    }
-
-    // 5. Rain Shrine Altar
-    else if (item.type === 'shrine_rain') {
-      if (!item.isTaken) {
-        item.isTaken = true;
-        if (item.staffGroup) item.staffGroup.visible = false;
-        this.player.inventory.staffOfRain = true;
-        soundEngine.playSFX('level_up');
-        this.particles.spawnSpellBurst(item.position, 'radiant');
-        this.ui.showToast("Thou hast acquired the sacred Staff of Rain!");
-        this.checkRainbowDropCraft();
-      }
-    }
-
-    // 6. Kol Hot Spring Digging
-    else if (item.type === 'dig_flute') {
-      if (!item.isDug) {
-        item.isDug = true;
-        this.player.inventory.fairyFlute = true;
-        soundEngine.playSFX('chest_open');
-        this.ui.showToast("Dug beneath the hot springs... Discovered the ancient Fairy Flute!");
-        this.ui.showFluteModal();
-      }
-    }
-
-    // 7. Erdrick's Tablet
-    else if (item.type === 'tablet') {
-      soundEngine.playSFX('menu_select');
-      this.ui.showDialogue(item.name, [item.text]);
-    }
-
-    // 8. Western Cape & Rainbow Drop
-    else if (item.type === 'charlock_cape') {
-      if (this.charlock.bridgeBuilt) {
-        this.ui.showToast("The Rainbow Bridge shines brilliantly across the abyss to Charlock!");
-      } else if (this.player.inventory.rainbowDrop) {
-        // Epic Rainbow Bridge Cutscene!
-        soundEngine.playSFX('level_up');
-        this.particles.spawnSpellBurst(item.position, 'radiant');
-        this.charlock.buildRainbowBridge();
-        this.ui.showToast("The Rainbow Drop shines with celestial light! A shimmering rainbow bridge spans the strait!");
-      } else {
-        this.ui.showToast("The dark volcanic isle of Charlock looms across the foggy water. Thou needst the Rainbow Drop to span the sea!");
-      }
-    }
-  }
-
-  checkRainbowDropCraft() {
-    const inv = this.player.inventory;
-    if (inv.sunstone && inv.staffOfRain && !inv.rainbowDrop) {
-      inv.rainbowDrop = true;
-      setTimeout(() => {
-        soundEngine.playSFX('level_up');
-        this.ui.showToast("✨ The Sunstone and Staff of Rain resonate! The legendary RAINBOW DROP is forged! ✨");
-        this.ui.updateHUD();
-      }, 1500);
-    }
-  }
-
-  onGreenDragonDefeated() {
-    this.greenDragonDefeated = true;
-    if (this.greenDragonMesh) this.greenDragonMesh.visible = false;
-    this.cave.unlockPrincessBarrier();
-    this.ui.showToast("The Green Dragon has collapsed! Princess Gwaelin is freed from her crystal prison!");
-  }
-
-  onDragonlordDefeated() {
-    this.dragonlordDefeated = true;
-    if (this.dragonlordMesh) this.dragonlordMesh.visible = false;
-    soundEngine.playSFX('level_up');
-    this.ui.showDialogue("Victory Over Darkness", [
-      "The colossal True Dragonlord roars as ancient light pierces his obsidian heart!",
-      "The stolen Ball of Light returns to thy hands, casting glorious golden dawn across Alefgard!",
-      "Peace has returned to the kingdom. Erdrick's legacy shall shine forevermore!"
-    ]);
   }
 
   render() {
-    this.renderer.render(this.scene, this.camera);
-  }
-
-  onWindowResize() {
-    const w = window.innerWidth;
-    const h = window.innerHeight;
-    this.camera.aspect = w / h;
-    this.camera.updateProjectionMatrix();
-    this.renderer.setSize(w, h);
+    if (!this.renderer) return;
+    if (this.ui?.mode === 'title') return;
+    this.renderer.renderWorld(this);
   }
 }
 
-// Boot game on window load
-if (document.readyState === 'loading') {
-  window.addEventListener('DOMContentLoaded', () => {
-    new DragonWarriorGame();
-  });
-} else {
-  new DragonWarriorGame();
+if (typeof document !== 'undefined') {
+  if (document.readyState === 'loading') {
+    window.addEventListener('DOMContentLoaded', () => new DragonWarriorGame(false));
+  } else {
+    new DragonWarriorGame(false);
+  }
 }
